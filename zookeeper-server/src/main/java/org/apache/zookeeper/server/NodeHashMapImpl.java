@@ -21,8 +21,8 @@ package org.apache.zookeeper.server;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import org.apache.zookeeper.ZooDefs;
 import org.apache.zookeeper.server.util.AdHash;
-import org.apache.zookeeper.server.util.DigestCalculator;
 
 /**
  * a simple wrapper to ConcurrentHashMap that recalculates a digest after
@@ -30,9 +30,18 @@ import org.apache.zookeeper.server.util.DigestCalculator;
  */
 public class NodeHashMapImpl implements NodeHashMap {
 
-    private final ConcurrentHashMap<String, DataNode> nodes = new ConcurrentHashMap<String, DataNode>();
+    private final ConcurrentHashMap<String, DataNode> nodes;
+    private final boolean digestEnabled;
+    private final DigestCalculator digestCalculator;
 
-    private AdHash hash = new AdHash();
+    private final AdHash hash;
+
+    public NodeHashMapImpl(DigestCalculator digestCalculator) {
+        this.digestCalculator = digestCalculator;
+        nodes = new ConcurrentHashMap<>();
+        hash = new AdHash();
+        digestEnabled = ZooKeeperServer.isDigestEnabled();
+    }
 
     @Override
     public DataNode put(String path, DataNode node) {
@@ -64,11 +73,6 @@ public class NodeHashMapImpl implements NodeHashMap {
     }
 
     @Override
-    public ConcurrentHashMap.KeySetView<String, DataNode> keySet() {
-        return nodes.keySet();
-    }
-
-    @Override
     public Set<Map.Entry<String, DataNode>> entrySet() {
         return nodes.entrySet();
     }
@@ -76,7 +80,7 @@ public class NodeHashMapImpl implements NodeHashMap {
     @Override
     public void clear() {
         nodes.clear();
-        hash = new AdHash();
+        hash.clear();
     }
 
     @Override
@@ -98,14 +102,22 @@ public class NodeHashMapImpl implements NodeHashMap {
     }
 
     private void addDigest(String path, DataNode node) {
-        if (DigestCalculator.digestEnabled()) {
-            hash.addDigest(DigestCalculator.calculateDigest(path, node));
+        // Excluding everything under '/zookeeper/' for digest calculation.
+        if (path.startsWith(ZooDefs.ZOOKEEPER_NODE_SUBTREE)) {
+            return;
+        }
+        if (digestEnabled) {
+            hash.addDigest(digestCalculator.calculateDigest(path, node));
         }
     }
 
     private void removeDigest(String path, DataNode node) {
-        if (DigestCalculator.digestEnabled()) {
-            hash.removeDigest(DigestCalculator.calculateDigest(path, node));
+        // Excluding everything under '/zookeeper/' for digest calculation.
+        if (path.startsWith(ZooDefs.ZOOKEEPER_NODE_SUBTREE)) {
+            return;
+        }
+        if (digestEnabled) {
+            hash.removeDigest(digestCalculator.calculateDigest(path, node));
         }
     }
 

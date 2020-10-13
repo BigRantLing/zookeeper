@@ -18,8 +18,8 @@
 
 package org.apache.zookeeper.test;
 
-import static org.junit.Assert.assertNotEquals;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -34,16 +34,16 @@ import org.apache.zookeeper.ZooDefs;
 import org.apache.zookeeper.common.Time;
 import org.apache.zookeeper.server.DataNode;
 import org.apache.zookeeper.server.DataTree;
+import org.apache.zookeeper.server.ZooKeeperServer;
 import org.apache.zookeeper.server.persistence.FileHeader;
 import org.apache.zookeeper.server.persistence.FileTxnLog;
 import org.apache.zookeeper.server.persistence.FileTxnSnapLog;
-import org.apache.zookeeper.server.util.DigestCalculator;
 import org.apache.zookeeper.txn.CreateTxn;
 import org.apache.zookeeper.txn.DeleteTxn;
 import org.apache.zookeeper.txn.MultiTxn;
 import org.apache.zookeeper.txn.Txn;
 import org.apache.zookeeper.txn.TxnHeader;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -58,7 +58,7 @@ public class LoadFromLogNoServerTest extends ZKTestCase {
     @Test
     public void testTxnFailure() throws Exception {
         try {
-            DigestCalculator.setDigestEnabled(true);
+            ZooKeeperServer.setDigestEnabled(true);
 
             long count = 1;
             File tmpDir = ClientBase.createTmpDir();
@@ -73,21 +73,21 @@ public class LoadFromLogNoServerTest extends ZKTestCase {
             DataNode zk = dt.getNode("/test");
 
             // Make create to fail, then verify cversion.
-            LOG.info("Attempting to create " + "/test/" + (count - 1));
+            LOG.info("Attempting to create /test/{}", (count - 1));
             doOp(logFile, ZooDefs.OpCode.create, "/test/" + (count - 1), dt, zk, -1);
             assertNotEquals(digestBefore, dt.getTreeDigest());
 
-            LOG.info("Attempting to create " + "/test/" + (count - 1));
+            LOG.info("Attempting to create /test/{}", (count - 1));
             digestBefore = dt.getTreeDigest();
             doOp(logFile, ZooDefs.OpCode.create, "/test/" + (count - 1), dt, zk, zk.stat.getCversion() + 1);
             assertNotEquals(digestBefore, dt.getTreeDigest());
 
-            LOG.info("Attempting to create " + "/test/" + (count - 1));
+            LOG.info("Attempting to create /test/{}", (count - 1));
             digestBefore = dt.getTreeDigest();
             doOp(logFile, ZooDefs.OpCode.multi, "/test/" + (count - 1), dt, zk, zk.stat.getCversion() + 1);
             assertNotEquals(digestBefore, dt.getTreeDigest());
 
-            LOG.info("Attempting to create " + "/test/" + (count - 1));
+            LOG.info("Attempting to create /test/{}", (count - 1));
             digestBefore = dt.getTreeDigest();
             doOp(logFile, ZooDefs.OpCode.multi, "/test/" + (count - 1), dt, zk, -1);
             assertNotEquals(digestBefore, dt.getTreeDigest());
@@ -97,7 +97,7 @@ public class LoadFromLogNoServerTest extends ZKTestCase {
             // LOG.info("Attempting to delete " + "/test/" + (count + 1));
             // doOp(logFile, OpCode.delete, "/test/" + (count + 1), dt, zk);
         } finally {
-            DigestCalculator.setDigestEnabled(false);
+            ZooKeeperServer.setDigestEnabled(false);
         }
     }
 
@@ -116,8 +116,8 @@ public class LoadFromLogNoServerTest extends ZKTestCase {
         for (String s : child) {
             childStr.append(s).append(" ");
         }
-        LOG.info("Children: " + childStr + " for " + parentName);
-        LOG.info("(cverions, pzxid): " + prevCversion + ", " + prevPzxid);
+        LOG.info("Children: {} for {}", childStr, parentName);
+        LOG.info("(cverions, pzxid): {}, {}", prevCversion, prevPzxid);
 
         Record txn = null;
         TxnHeader txnHeader = null;
@@ -149,19 +149,11 @@ public class LoadFromLogNoServerTest extends ZKTestCase {
         for (String s : child) {
             childStr.append(s).append(" ");
         }
-        LOG.info("Children: " + childStr + " for " + parentName);
-        LOG.info("(cverions, pzxid): " + newCversion + ", " + newPzxid);
-        assertTrue(type
-                                  + " <cversion, pzxid> verification failed. Expected: <"
-                                  + (prevCversion + 1)
-                                  + ", "
-                                  + (prevPzxid
-                                             + 1)
-                                  + ">, found: <"
-                                  + newCversion
-                                  + ", "
-                                  + newPzxid
-                                  + ">", (newCversion == prevCversion + 1 && newPzxid == prevPzxid + 1));
+        LOG.info("Children: {} for {}", childStr, parentName);
+        LOG.info("(cverions, pzxid): {}, {}", newCversion, newPzxid);
+        assertTrue((newCversion == prevCversion + 1 && newPzxid == prevPzxid + 1),
+                type + " <cversion, pzxid> verification failed. Expected: <" + (prevCversion + 1) + ", "
+                        + (prevPzxid + 1) + ">, found: <" + newCversion + ", " + newPzxid + ">");
     }
 
     /**
@@ -179,8 +171,8 @@ public class LoadFromLogNoServerTest extends ZKTestCase {
         BinaryInputArchive ia = BinaryInputArchive.getArchive(in);
         FileHeader header = new FileHeader();
         header.deserialize(ia, "fileheader");
-        LOG.info("Received magic : " + header.getMagic() + " Expected : " + FileTxnLog.TXNLOG_MAGIC);
-        assertTrue("Missing magic number ", header.getMagic() == FileTxnLog.TXNLOG_MAGIC);
+        LOG.info("Received magic : {} Expected : {}", header.getMagic(), FileTxnLog.TXNLOG_MAGIC);
+        assertTrue(header.getMagic() == FileTxnLog.TXNLOG_MAGIC, "Missing magic number ");
     }
 
 }
