@@ -26,6 +26,8 @@ import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
+import java.nio.channels.UnresolvedAddressException;
+import java.nio.channels.UnsupportedAddressTypeException;
 import java.util.Iterator;
 import java.util.Queue;
 import java.util.Set;
@@ -152,12 +154,12 @@ public class ClientCnxnSocketNIO extends ClientCnxnSocket {
         }
     }
 
-    private Packet findSendablePacket(LinkedBlockingDeque<Packet> outgoingQueue, boolean tunneledAuthInProgres) {
+    private Packet findSendablePacket(LinkedBlockingDeque<Packet> outgoingQueue, boolean tunneledAuthInProgress) {
         if (outgoingQueue.isEmpty()) {
             return null;
         }
         // If we've already starting sending the first packet, we better finish
-        if (outgoingQueue.getFirst().bb != null || !tunneledAuthInProgres) {
+        if (outgoingQueue.getFirst().bb != null || !tunneledAuthInProgress) {
             return outgoingQueue.getFirst();
         }
         // Since client's authentication with server is in progress,
@@ -176,7 +178,7 @@ public class ClientCnxnSocketNIO extends ClientCnxnSocket {
             } else {
                 // Non-priming packet: defer it until later, leaving it in the queue
                 // until authentication completes.
-                LOG.debug("deferring non-priming packet {} until SASL authentation completes.", p);
+                LOG.debug("Deferring non-priming packet {} until SASL authentication completes.", p);
             }
         }
         return null;
@@ -207,6 +209,12 @@ public class ClientCnxnSocketNIO extends ClientCnxnSocket {
             } catch (IOException e) {
                 LOG.debug("Ignoring exception during channel close", e);
             }
+            try {
+                selector.wakeup();
+                selector.selectNow();
+            } catch (IOException e) {
+                LOG.debug("Ignoring exception during selecting of cancelled socket", e);
+            }
         }
         try {
             Thread.sleep(100);
@@ -219,9 +227,15 @@ public class ClientCnxnSocketNIO extends ClientCnxnSocket {
     @Override
     void close() {
         try {
-            LOG.trace("Doing client selector close");
+            if (LOG.isTraceEnabled()) {
+                LOG.trace("Doing client selector close");
+            }
+
             selector.close();
-            LOG.trace("Closed client selector");
+
+            if (LOG.isTraceEnabled()) {
+                LOG.trace("Closed client selector");
+            }
         } catch (IOException e) {
             LOG.warn("Ignoring exception during selector close", e);
         }
@@ -260,8 +274,8 @@ public class ClientCnxnSocketNIO extends ClientCnxnSocket {
         SocketChannel sock = createSock();
         try {
             registerAndConnect(sock, addr);
-        } catch (IOException e) {
-            LOG.error("Unable to open socket to " + addr);
+        } catch (UnresolvedAddressException | UnsupportedAddressTypeException | SecurityException | IOException e) {
+            LOG.error("Unable to open socket to {}", addr);
             sock.close();
             throw e;
         }
@@ -327,18 +341,18 @@ public class ClientCnxnSocketNIO extends ClientCnxnSocket {
             selected = selector.selectedKeys();
         }
         // Everything below and until we get back to the select is
-        // non blocking, so time is effectively a constant. That is
+        // non-blocking, so time is effectively a constant. That is
         // Why we just have to do this once, here
         updateNow();
         for (SelectionKey k : selected) {
             SocketChannel sc = ((SocketChannel) k.channel());
-            if ((k.readyOps() & SelectionKey.OP_CONNECT) != 0) {
+            if (k.isConnectable()) {
                 if (sc.finishConnect()) {
                     updateLastSendAndHeard();
                     updateSocketAddresses();
                     sendThread.primeConnection();
                 }
-            } else if ((k.readyOps() & (SelectionKey.OP_READ | SelectionKey.OP_WRITE)) != 0) {
+            } else if (k.isReadable() || k.isWritable()) {
                 doIO(pendingQueue, cnxn);
             }
         }

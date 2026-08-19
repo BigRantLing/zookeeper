@@ -18,7 +18,7 @@
 
 package org.apache.zookeeper.test;
 
-import static org.junit.Assert.fail;
+import static org.junit.jupiter.api.Assertions.fail;
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
@@ -27,9 +27,9 @@ import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.ZooDefs.Ids;
 import org.apache.zookeeper.ZooKeeper;
 import org.apache.zookeeper.client.ZKClientConfig;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
-public class SaslAuthMissingClientConfigTest extends ClientBase {
+public class SaslAuthMissingClientConfigTest extends SaslAuthDigestTestBase {
 
     static {
         System.setProperty("zookeeper.authProvider.1", "org.apache.zookeeper.server.auth.SASLAuthenticationProvider");
@@ -71,7 +71,7 @@ public class SaslAuthMissingClientConfigTest extends ClientBase {
             fail("Should have gotten exception.");
         } catch (KeeperException e) {
             // ok, exception as expected.
-            LOG.info("Got exception as expected: " + e);
+            LOG.debug("Got exception as expected", e);
         } finally {
             zk.close();
         }

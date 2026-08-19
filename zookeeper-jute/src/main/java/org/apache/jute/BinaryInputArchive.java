@@ -34,26 +34,39 @@ public class BinaryInputArchive implements InputArchive {
     // CHECKSTYLE.OFF: ConstantName - for backward compatibility
     public static final int maxBuffer = Integer.getInteger("jute.maxbuffer", 0xfffff);
     // CHECKSTYLE.ON:
+    private static final int extraMaxBuffer;
 
-    private DataInput in;
+    static {
+        final Integer configuredExtraMaxBuffer =
+            Integer.getInteger("zookeeper.jute.maxbuffer.extrasize", maxBuffer);
+        if (configuredExtraMaxBuffer < 1024) {
+            // Earlier hard coded value was 1024, So the value should not be less than that value
+            extraMaxBuffer = 1024;
+        } else {
+            extraMaxBuffer = configuredExtraMaxBuffer;
+        }
+    }
 
-    public static BinaryInputArchive getArchive(InputStream strm) {
-        return new BinaryInputArchive(new DataInputStream(strm));
+    private final DataInput in;
+    private final int totalBufferSize;
+
+    public static BinaryInputArchive getArchive(InputStream stream) {
+        return new BinaryInputArchive(new DataInputStream(stream));
     }
 
     private static class BinaryIndex implements Index {
-        private int nelems;
+        private int n;
 
         BinaryIndex(int nelems) {
-            this.nelems = nelems;
+            this.n = nelems;
         }
 
         public boolean done() {
-            return (nelems <= 0);
+            return (n <= 0);
         }
 
         public void incr() {
-            nelems--;
+            n--;
         }
     }
 
@@ -61,7 +74,16 @@ public class BinaryInputArchive implements InputArchive {
      * Creates a new instance of BinaryInputArchive.
      */
     public BinaryInputArchive(DataInput in) {
+        this(in, maxBuffer, extraMaxBuffer);
+    }
+
+    public BinaryInputArchive(DataInput in, int maxBufferSize, int extraMaxBufferSize) {
         this.in = in;
+        if ((long) maxBufferSize + extraMaxBufferSize > Integer.MAX_VALUE) {
+            this.totalBufferSize = Integer.MAX_VALUE;
+        } else {
+            this.totalBufferSize = maxBufferSize + extraMaxBufferSize;
+        }
     }
 
     public byte readByte(String tag) throws IOException {
@@ -142,7 +164,7 @@ public class BinaryInputArchive implements InputArchive {
     // make up for extra fields, etc. (otherwise e.g. clients may be able to
     // write buffers larger than we can read from disk!)
     private void checkLength(int len) throws IOException {
-        if (len < 0 || len > maxBuffer + 1024) {
+        if (len < 0 || len > totalBufferSize) {
             throw new IOException(UNREASONBLE_LENGTH + len);
         }
     }

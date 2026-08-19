@@ -21,7 +21,9 @@ package org.apache.zookeeper.server.persistence;
 import java.io.Closeable;
 import java.io.IOException;
 import org.apache.jute.Record;
+import org.apache.zookeeper.server.Request;
 import org.apache.zookeeper.server.ServerStats;
+import org.apache.zookeeper.txn.TxnDigest;
 import org.apache.zookeeper.txn.TxnHeader;
 
 /**
@@ -42,14 +44,14 @@ public interface TxnLog extends Closeable {
      * @throws IOException
      */
     void rollLog() throws IOException;
+
     /**
-     * Append a request to the transaction log
-     * @param hdr the transaction header
-     * @param r the transaction itself
-     * @return true iff something appended, otw false
+     * Append a request to the transaction log with a digest
+     * @param request the request to be appended
+     * returns true iff something appended, otw false
      * @throws IOException
      */
-    boolean append(TxnHeader hdr, Record r) throws IOException;
+    boolean append(Request request) throws IOException;
 
     /**
      * Start reading the transaction logs
@@ -97,6 +99,11 @@ public interface TxnLog extends Closeable {
     long getTxnLogSyncElapsedTime();
 
     /**
+     * close the transactions logs
+     */
+    void close() throws IOException;
+
+    /**
      * Sets the total size of all log files
      */
     void setTotalLogSize(long size);
@@ -125,10 +132,22 @@ public interface TxnLog extends Closeable {
         Record getTxn();
 
         /**
+         * @return the digest associated with the transaction.
+         */
+        TxnDigest getDigest();
+
+        /**
          * go to the next transaction record.
          * @throws IOException
          */
         boolean next() throws IOException;
+
+        /**
+         * close files and release the
+         * resources
+         * @throws IOException
+         */
+        void close() throws IOException;
 
         /**
          * Get an estimated storage space used to store transaction records

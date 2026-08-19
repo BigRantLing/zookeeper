@@ -22,10 +22,14 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.Supplier;
 import javax.management.JMException;
+import javax.security.auth.callback.CallbackHandler;
 import javax.security.auth.login.AppConfigurationEntry;
 import javax.security.auth.login.Configuration;
 import javax.security.auth.login.LoginException;
@@ -40,6 +44,9 @@ import org.slf4j.LoggerFactory;
 public abstract class ServerCnxnFactory {
 
     public static final String ZOOKEEPER_SERVER_CNXN_FACTORY = "zookeeper.serverCnxnFactory";
+    private static final String ZOOKEEPER_MAX_CONNECTION = "zookeeper.maxCnxns";
+    private static final String DIGEST_MD5_USER_PREFIX = "user_";
+    public static final int ZOOKEEPER_MAX_CONNECTION_DEFAULT = 0;
 
     private static final Logger LOG = LoggerFactory.getLogger(ServerCnxnFactory.class);
 
@@ -51,8 +58,13 @@ public abstract class ServerCnxnFactory {
      */
     static final ByteBuffer closeConn = ByteBuffer.allocate(0);
 
+    // total number of connections accepted by the ZooKeeper server
+    protected int maxCnxns;
+
     // sessionMap is used by closeSession()
-    final ConcurrentHashMap<Long, ServerCnxn> sessionMap = new ConcurrentHashMap<Long, ServerCnxn>();
+    final ConcurrentHashMap<Long, ServerCnxn> sessionMap = new ConcurrentHashMap<>();
+
+    private static String loginUser = Login.SYSTEM_USER;
 
     public void addSession(long sessionId, ServerCnxn cnxn) {
         sessionMap.put(sessionId, cnxn);
@@ -106,7 +118,6 @@ public abstract class ServerCnxnFactory {
 
     public abstract void reconfigure(InetSocketAddress addr);
 
-    protected SaslServerCallbackHandler saslServerCallbackHandler;
     public Login login;
 
     /** Maximum number of connections allowed from particular host (ip) */
@@ -123,7 +134,7 @@ public abstract class ServerCnxnFactory {
         startup(zkServer, true);
     }
 
-    // This method is to maintain compatiblity of startup(zks) and enable sharing of zks
+    // This method is to maintain compatibility of startup(zks) and enable sharing of zks
     // when we add secureCnxnFactory.
     public abstract void startup(ZooKeeperServer zkServer, boolean startServer) throws IOException, InterruptedException;
 
@@ -149,6 +160,56 @@ public abstract class ServerCnxnFactory {
     }
 
     public abstract void closeAll(ServerCnxn.DisconnectReason reason);
+
+    /**
+     * Attempts to shed approximately the specified percentage of connections.
+     *
+     * @param percentage [0-100] percentage of connections to shed
+     * @return actual number of connections successfully closed (may vary due to randomness)
+     * @throws IllegalArgumentException if percentage not in [0, 100]
+     */
+    public int shedConnections(final int percentage) {
+        if (percentage < 0 || percentage > 100) {
+            throw new IllegalArgumentException("percentage must be between 0 and 100, got: " + percentage);
+        }
+
+        final int totalConnections = cnxns.size();
+        if (percentage == 0 || totalConnections == 0) {
+            return 0;
+        }
+
+        int actualShedCount = 0;
+        // For 100%, close all connections deterministically
+        if (percentage == 100) {
+            for (final ServerCnxn cnxn : cnxns) {
+                try {
+                    cnxn.close(ServerCnxn.DisconnectReason.SHED_CONNECTIONS_COMMAND);
+                    actualShedCount++;
+                } catch (final Exception e) {
+                    LOG.warn("Failed to close connection for session 0x{}: {}",
+                            Long.toHexString(cnxn.getSessionId()), e.getMessage());
+                }
+            }
+        } else {
+            // For other percentages, use probabilistic approach
+            final ThreadLocalRandom random = ThreadLocalRandom.current();
+            final double probability = percentage / 100.0;
+
+            for (final ServerCnxn cnxn : cnxns) {
+                if (random.nextDouble() < probability) {
+                    try {
+                        cnxn.close(ServerCnxn.DisconnectReason.SHED_CONNECTIONS_COMMAND);
+                        actualShedCount++;
+                    } catch (final Exception e) {
+                        LOG.warn("Failed to close connection for session 0x{}: {}",
+                                Long.toHexString(cnxn.getSessionId()), e.getMessage());
+                    }
+                }
+            }
+        }
+        LOG.info("Shed {} out of {} connections ({}%)", actualShedCount, totalConnections, percentage);
+        return actualShedCount;
+    }
 
     public static ServerCnxnFactory createFactory() throws IOException {
         String serverCnxnFactoryName = System.getProperty(ZOOKEEPER_SERVER_CNXN_FACTORY);
@@ -191,11 +252,11 @@ public abstract class ServerCnxnFactory {
 
     public abstract Iterable<Map<String, Object>> getAllConnectionInfo(boolean brief);
 
-    private final ConcurrentHashMap<ServerCnxn, ConnectionBean> connectionBeans = new ConcurrentHashMap<ServerCnxn, ConnectionBean>();
+    private final ConcurrentHashMap<ServerCnxn, ConnectionBean> connectionBeans = new ConcurrentHashMap<>();
 
     // Connection set is relied on heavily by four letter commands
     // Construct a ConcurrentHashSet using a ConcurrentHashMap
-    protected final Set<ServerCnxn> cnxns = Collections.newSetFromMap(new ConcurrentHashMap<ServerCnxn, Boolean>());
+    protected final Set<ServerCnxn> cnxns = Collections.newSetFromMap(new ConcurrentHashMap<>());
     public void unregisterConnection(ServerCnxn serverCnxn) {
         ConnectionBean jmxConnectionBean = connectionBeans.remove(serverCnxn);
         if (jmxConnectionBean != null) {
@@ -254,7 +315,7 @@ public abstract class ServerCnxnFactory {
                 if (loginContextName != null) {
                     errorMessage += " But " + ZooKeeperSaslServer.LOGIN_CONTEXT_NAME_KEY + " was set.";
                 }
-                LOG.error(errorMessage);
+                LOG.error(errorMessage, securityException);
                 throw new IOException(errorMessage);
             }
             return;
@@ -262,8 +323,12 @@ public abstract class ServerCnxnFactory {
 
         // jaas.conf entry available
         try {
-            saslServerCallbackHandler = new SaslServerCallbackHandler(Configuration.getConfiguration());
-            login = new Login(serverSection, saslServerCallbackHandler, new ZKConfig());
+            Map<String, String> credentials = getDigestMd5Credentials(entries);
+            Supplier<CallbackHandler> callbackHandlerSupplier = () -> {
+                return new SaslServerCallbackHandler(credentials);
+            };
+            login = new Login(serverSection, callbackHandlerSupplier, new ZKConfig());
+            setLoginUser(login.getUserName());
             login.startThreadIfNeeded();
         } catch (LoginException e) {
             throw new IOException("Could not configure server because SASL configuration did not allow the "
@@ -272,4 +337,74 @@ public abstract class ServerCnxnFactory {
         }
     }
 
+    /**
+     * make server credentials map from configuration's server section.
+     * @param appConfigurationEntries AppConfigurationEntry List
+     * @return Server credentials map
+     */
+    private static Map<String, String> getDigestMd5Credentials(final  AppConfigurationEntry[] appConfigurationEntries) {
+        Map<String, String> credentials = new HashMap<>();
+        for (AppConfigurationEntry entry : appConfigurationEntries) {
+            Map<String, ?> options = entry.getOptions();
+            // Populate DIGEST-MD5 user -> password map with JAAS configuration entries from the "Server" section.
+            // Usernames are distinguished from other options by prefixing the username with a "user_" prefix.
+            for (Map.Entry<String, ?> pair : options.entrySet()) {
+                String key = pair.getKey();
+                if (key.startsWith(DIGEST_MD5_USER_PREFIX)) {
+                    String userName = key.substring(DIGEST_MD5_USER_PREFIX.length());
+                    credentials.put(userName, (String) pair.getValue());
+                }
+            }
+        }
+        return credentials;
+    }
+
+    private static void setLoginUser(String name) {
+        //Created this method to avoid ST_WRITE_TO_STATIC_FROM_INSTANCE_METHOD find bug issue
+        loginUser = name;
+    }
+    /**
+     * User who has started the ZooKeeper server user, it will be the logged-in
+     * user. If no user logged-in then system user
+     */
+    public static String getUserName() {
+        return loginUser;
+    }
+
+    /**
+     * Maximum number of connections allowed in the ZooKeeper system
+     */
+    public int getMaxCnxns() {
+        return maxCnxns;
+    }
+
+    protected void initMaxCnxns() {
+        maxCnxns = Integer.getInteger(ZOOKEEPER_MAX_CONNECTION, ZOOKEEPER_MAX_CONNECTION_DEFAULT);
+        if (maxCnxns < 0) {
+            maxCnxns = ZOOKEEPER_MAX_CONNECTION_DEFAULT;
+            LOG.warn("maxCnxns should be greater than or equal to 0, using default value {}.",
+                    ZOOKEEPER_MAX_CONNECTION_DEFAULT);
+        } else if (maxCnxns == ZOOKEEPER_MAX_CONNECTION_DEFAULT) {
+            LOG.warn("maxCnxns is not configured, using default value {}.",
+                    ZOOKEEPER_MAX_CONNECTION_DEFAULT);
+        } else {
+            LOG.info("maxCnxns configured value is {}.", maxCnxns);
+        }
+    }
+
+    /**
+     * Ensure total number of connections are less than the maxCnxns
+     */
+    protected boolean limitTotalNumberOfCnxns() {
+        if (maxCnxns <= 0) {
+            // maxCnxns limit is disabled
+            return false;
+        }
+        int cnxns = getNumAliveConnections();
+        if (cnxns >= maxCnxns) {
+            LOG.error("Too many connections " + cnxns + " - max is " + maxCnxns);
+            return true;
+        }
+        return false;
+    }
 }

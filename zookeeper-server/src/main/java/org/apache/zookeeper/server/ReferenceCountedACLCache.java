@@ -22,9 +22,9 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 import org.apache.jute.Index;
 import org.apache.jute.InputArchive;
@@ -38,11 +38,11 @@ public class ReferenceCountedACLCache {
 
     private static final Logger LOG = LoggerFactory.getLogger(ReferenceCountedACLCache.class);
 
-    final Map<Long, List<ACL>> longKeyMap = new HashMap<Long, List<ACL>>();
+    final Map<Long, List<ACL>> longKeyMap = new HashMap<>();
 
-    final Map<List<ACL>, Long> aclKeyMap = new HashMap<List<ACL>, Long>();
+    final Map<List<ACL>, Long> aclKeyMap = new HashMap<>();
 
-    final Map<Long, AtomicLongWithEquals> referenceCounter = new HashMap<Long, AtomicLongWithEquals>();
+    final Map<Long, AtomicLongWithEquals> referenceCounter = new HashMap<>();
     private static final long OPEN_UNSAFE_ACL_ID = -1L;
 
     /**
@@ -89,7 +89,7 @@ public class ReferenceCountedACLCache {
         }
         List<ACL> acls = longKeyMap.get(longVal);
         if (acls == null) {
-            LOG.error("ERROR: ACL not available for long " + longVal);
+            LOG.error("ERROR: ACL not available for long {}", longVal);
             throw new RuntimeException("Failed to fetch acls for " + longVal);
         }
         return acls;
@@ -99,18 +99,18 @@ public class ReferenceCountedACLCache {
         return ++aclIndex;
     }
 
-    public synchronized void deserialize(InputArchive ia) throws IOException {
+    public void deserialize(InputArchive ia) throws IOException {
         clear();
         int i = ia.readInt("map");
+
+        LinkedHashMap<Long, List<ACL>> deserializedMap = new LinkedHashMap<>();
+        // keep read operations out of synchronization block
         while (i > 0) {
             Long val = ia.readLong("long");
-            if (aclIndex < val) {
-                aclIndex = val;
-            }
-            List<ACL> aclList = new ArrayList<ACL>();
+            List<ACL> aclList = new ArrayList<>();
             Index j = ia.startVector("acls");
             if (j == null) {
-                throw new RuntimeException("Incorrent format of InputArchive when deserialize DataTree - missing acls");
+                throw new RuntimeException("Incorrect format of InputArchive when deserialize DataTree - missing acls");
             }
             while (!j.done()) {
                 ACL acl = new ACL();
@@ -118,17 +118,33 @@ public class ReferenceCountedACLCache {
                 aclList.add(acl);
                 j.incr();
             }
-            longKeyMap.put(val, aclList);
-            aclKeyMap.put(aclList, val);
-            referenceCounter.put(val, new AtomicLongWithEquals(0));
+
+            deserializedMap.put(val, aclList);
             i--;
+        }
+
+        synchronized (this) {
+            for (Map.Entry<Long, List<ACL>> entry : deserializedMap.entrySet()) {
+                Long val = entry.getKey();
+                List<ACL> aclList = entry.getValue();
+                if (aclIndex < val) {
+                    aclIndex = val;
+                }
+
+                longKeyMap.put(val, aclList);
+                aclKeyMap.put(aclList, val);
+                referenceCounter.put(val, new AtomicLongWithEquals(0));
+            }
         }
     }
 
-    public synchronized void serialize(OutputArchive oa) throws IOException {
-        oa.writeInt(longKeyMap.size(), "map");
-        Set<Map.Entry<Long, List<ACL>>> set = longKeyMap.entrySet();
-        for (Map.Entry<Long, List<ACL>> val : set) {
+    public void serialize(OutputArchive oa) throws IOException {
+        Map<Long, List<ACL>> clonedLongKeyMap;
+        synchronized (this) {
+            clonedLongKeyMap = new HashMap<>(longKeyMap);
+        }
+        oa.writeInt(clonedLongKeyMap.size(), "map");
+        for (Map.Entry<Long, List<ACL>> val : clonedLongKeyMap.entrySet()) {
             oa.writeLong(val.getKey(), "long");
             List<ACL> aclList = val.getValue();
             oa.startVector(aclList, "acls");
@@ -155,7 +171,7 @@ public class ReferenceCountedACLCache {
         }
 
         if (!longKeyMap.containsKey(acl)) {
-            LOG.info("Ignoring acl " + acl + " as it does not exist in the cache");
+            LOG.info("Ignoring acl {} as it does not exist in the cache", acl);
             return;
         }
 
@@ -173,7 +189,7 @@ public class ReferenceCountedACLCache {
         }
 
         if (!longKeyMap.containsKey(acl)) {
-            LOG.info("Ignoring acl " + acl + " as it does not exist in the cache");
+            LOG.info("Ignoring acl {} as it does not exist in the cache", acl);
             return;
         }
 

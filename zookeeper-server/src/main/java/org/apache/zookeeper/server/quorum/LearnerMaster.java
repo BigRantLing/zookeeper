@@ -44,10 +44,10 @@ public abstract class LearnerMaster {
 
     static {
         DEFAULT_CONCURRENT_SNAPSYNCS = Integer.getInteger(MAX_CONCURRENT_SNAPSYNCS, 10);
-        LOG.info(MAX_CONCURRENT_SNAPSYNCS + " = " + DEFAULT_CONCURRENT_SNAPSYNCS);
+        LOG.info("{} = {}", MAX_CONCURRENT_SNAPSYNCS, DEFAULT_CONCURRENT_SNAPSYNCS);
 
         DEFAULT_CONCURRENT_DIFF_SYNCS = Integer.getInteger(MAX_CONCURRENT_DIFF_SYNCS, 100);
-        LOG.info(MAX_CONCURRENT_DIFF_SYNCS + " = " + DEFAULT_CONCURRENT_DIFF_SYNCS);
+        LOG.info("{} = {}", MAX_CONCURRENT_DIFF_SYNCS, DEFAULT_CONCURRENT_DIFF_SYNCS);
     }
 
     private volatile int maxConcurrentSnapSyncs = DEFAULT_CONCURRENT_SNAPSYNCS;
@@ -124,7 +124,7 @@ public abstract class LearnerMaster {
      * get the first zxid of the next epoch
      * @param sid learner id
      * @param lastAcceptedEpoch
-     * @return
+     * @return the first zxid of the next epoch
      * @throws InterruptedException
      * @throws IOException
      */

@@ -18,6 +18,7 @@
 
 package org.apache.zookeeper.server;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.CompositeByteBuf;
@@ -37,13 +38,20 @@ import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.security.cert.Certificate;
 import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.jute.BinaryInputArchive;
 import org.apache.jute.Record;
+import org.apache.zookeeper.ClientCnxn;
+import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.WatchedEvent;
+import org.apache.zookeeper.ZooDefs;
+import org.apache.zookeeper.data.ACL;
 import org.apache.zookeeper.data.Id;
 import org.apache.zookeeper.data.Stat;
+import org.apache.zookeeper.proto.ConnectRequest;
 import org.apache.zookeeper.proto.ReplyHeader;
+import org.apache.zookeeper.proto.RequestHeader;
 import org.apache.zookeeper.proto.WatcherEvent;
 import org.apache.zookeeper.server.command.CommandExecutor;
 import org.apache.zookeeper.server.command.FourLetterCommands;
@@ -70,6 +78,14 @@ public class NettyServerCnxn extends ServerCnxn {
 
     public int readIssuedAfterReadComplete;
 
+    private volatile HandshakeState handshakeState = HandshakeState.NONE;
+
+    public enum HandshakeState {
+        NONE,
+        STARTED,
+        FINISHED
+    }
+
     NettyServerCnxn(Channel channel, ZooKeeperServer zks, NettyServerCnxnFactory factory) {
         super(zks);
         this.channel = channel;
@@ -94,9 +110,8 @@ public class NettyServerCnxn extends ServerCnxn {
     public void close() {
         closingChannel = true;
 
-        if (LOG.isDebugEnabled()) {
-            LOG.debug("close called for sessionid:0x{}", Long.toHexString(sessionId));
-        }
+        LOG.debug("close called for session id: 0x{}", Long.toHexString(sessionId));
+
         setStale();
 
         // ZOOKEEPER-2743:
@@ -106,14 +121,14 @@ public class NettyServerCnxn extends ServerCnxn {
 
         // if this is not in cnxns then it's already closed
         if (!factory.cnxns.remove(this)) {
-            if (LOG.isDebugEnabled()) {
-                LOG.debug("cnxns size:{}", factory.cnxns.size());
+            LOG.debug("cnxns size:{}", factory.cnxns.size());
+            if (channel.isOpen()) {
+                channel.close();
             }
             return;
         }
-        if (LOG.isDebugEnabled()) {
-            LOG.debug("close in progress for sessionid:0x{}", Long.toHexString(sessionId));
-        }
+
+        LOG.debug("close in progress for session id: 0x{}", Long.toHexString(sessionId));
 
         factory.removeCnxnFromSessionMap(this);
 
@@ -150,8 +165,19 @@ public class NettyServerCnxn extends ServerCnxn {
     }
 
     @Override
-    public void process(WatchedEvent event) {
-        ReplyHeader h = new ReplyHeader(-1, -1L, 0);
+    public void process(WatchedEvent event, List<ACL> znodeAcl) {
+        try {
+            zkServer.checkACL(this, znodeAcl, ZooDefs.Perms.READ, getAuthInfo(), event.getPath(), null);
+        } catch (KeeperException.NoAuthException e) {
+            if (LOG.isTraceEnabled()) {
+                ZooTrace.logTraceMessage(
+                    LOG,
+                    ZooTrace.EVENT_DELIVERY_TRACE_MASK,
+                    "Not delivering event " + event + " to 0x" + Long.toHexString(this.sessionId) + " (filtered by ACL)");
+            }
+            return;
+        }
+        ReplyHeader h = new ReplyHeader(ClientCnxn.NOTIFICATION_XID, event.getZxid(), 0);
         if (LOG.isTraceEnabled()) {
             ZooTrace.logTraceMessage(
                 LOG,
@@ -163,24 +189,28 @@ public class NettyServerCnxn extends ServerCnxn {
         WatcherEvent e = event.getWrapper();
 
         try {
-            sendResponse(h, e, "notification");
+            int responseSize = sendResponse(h, e, "notification");
+            ServerMetrics.getMetrics().WATCH_BYTES.add(responseSize);
         } catch (IOException e1) {
-            if (LOG.isDebugEnabled()) {
-                LOG.debug("Problem sending to " + getRemoteSocketAddress(), e1);
-            }
+            LOG.debug("Problem sending to {}", getRemoteSocketAddress(), e1);
             close();
         }
     }
 
     @Override
-    public void sendResponse(ReplyHeader h, Record r, String tag, String cacheKey, Stat stat) throws IOException {
+    public int sendResponse(ReplyHeader h, Record r, String tag,
+                             String cacheKey, Stat stat, int opCode) throws IOException {
         // cacheKey and stat are used in caching, which is not
         // implemented here. Implementation example can be found in NIOServerCnxn.
         if (closingChannel || !channel.isOpen()) {
-            return;
+            return 0;
         }
-        sendBuffer(serialize(h, r, tag, cacheKey, stat));
+        ByteBuffer[] bb = serialize(h, r, cacheKey, stat, opCode);
+        int responseSize = bb[0].getInt();
+        bb[0].rewind();
+        sendBuffer(bb);
         decrOutstandingAndCheckThrottle(h);
+        return responseSize;
     }
 
     @Override
@@ -221,7 +251,7 @@ public class NettyServerCnxn extends ServerCnxn {
          */
         private void checkFlush(boolean force) {
             if ((force && sb.length() > 0) || sb.length() > 2048) {
-                sendBuffer(ByteBuffer.wrap(sb.toString().getBytes()));
+                sendBuffer(ByteBuffer.wrap(sb.toString().getBytes(UTF_8)));
                 // clear our internal buffer
                 sb.setLength(0);
             }
@@ -335,8 +365,11 @@ public class NettyServerCnxn extends ServerCnxn {
      */
     void processMessage(ByteBuf buf) {
         checkIsInEventLoop("processMessage");
-        if (LOG.isDebugEnabled()) {
-            LOG.debug("0x{} queuedBuffer: {}", Long.toHexString(sessionId), queuedBuffer);
+        LOG.debug("0x{} queuedBuffer: {}", Long.toHexString(sessionId), queuedBuffer);
+
+        if (closingChannel) {
+            LOG.debug("Drop incoming message during connection closing for session 0x{}", Long.toHexString(sessionId));
+            return;
         }
 
         if (LOG.isTraceEnabled()) {
@@ -364,7 +397,9 @@ public class NettyServerCnxn extends ServerCnxn {
                 // Have to check !closingChannel, because an error in
                 // receiveMessage() could have led to close() being called.
                 if (!closingChannel && buf.isReadable()) {
-                    LOG.trace("Before copy {}", buf);
+                    if (LOG.isTraceEnabled()) {
+                        LOG.trace("Before copy {}", buf);
+                    }
 
                     if (queuedBuffer == null) {
                         queuedBuffer = channel.alloc().compositeBuffer();
@@ -464,12 +499,15 @@ public class NettyServerCnxn extends ServerCnxn {
                             throw new IOException("ZK down");
                         }
                         if (initialized) {
-                            // TODO: if zks.processPacket() is changed to take a ByteBuffer[],
-                            // we could implement zero-copy queueing.
-                            zks.processPacket(this, bb);
+                            RequestHeader h = new RequestHeader();
+                            ByteBufferInputStream.byteBuffer2Record(bb, h);
+                            RequestRecord request = RequestRecord.fromBytes(bb.slice());
+                            zks.processPacket(this, h, request);
                         } else {
                             LOG.debug("got conn req request from {}", getRemoteSocketAddress());
-                            zks.processConnectRequest(this, bb);
+                            BinaryInputArchive bia = BinaryInputArchive.getArchive(new ByteBufferInputStream(bb));
+                            ConnectRequest request = protocolManager.deserializeConnectRequest(bia);
+                            zks.processConnectRequest(this, request);
                             initialized = true;
                         }
                         bb = null;
@@ -507,18 +545,27 @@ public class NettyServerCnxn extends ServerCnxn {
                         if (len < 0 || len > BinaryInputArchive.maxBuffer) {
                             throw new IOException("Len error " + len);
                         }
+                        ZooKeeperServer zks = this.zkServer;
+                        if (zks == null || !zks.isRunning()) {
+                            LOG.info("Closing connection to {} because the server is not ready (server state is: {})",
+                                getRemoteSocketAddress(), zks == null ? "unknown" : zks.getState());
+                            close(DisconnectReason.IO_EXCEPTION);
+                            return;
+                        }
+                        // checkRequestSize will throw IOException if request is rejected
+                        zks.checkRequestSizeWhenReceivingMessage(len);
                         bb = ByteBuffer.allocate(len);
                     }
                 }
             }
         } catch (IOException e) {
-            LOG.warn("Closing connection to " + getRemoteSocketAddress(), e);
+            LOG.warn("Closing connection to {}", getRemoteSocketAddress(), e);
             close(DisconnectReason.IO_EXCEPTION);
         } catch (ClientCnxnLimitException e) {
             // Common case exception, print at debug level
             ServerMetrics.getMetrics().CONNECTION_REJECTED.add(1);
 
-            LOG.debug("Closing connection to " + getRemoteSocketAddress(), e);
+            LOG.debug("Closing connection to {}", getRemoteSocketAddress(), e);
             close(DisconnectReason.CLIENT_RATE_LIMIT);
         }
     }
@@ -633,4 +680,11 @@ public class NettyServerCnxn extends ServerCnxn {
         return 0;
     }
 
+    public void setHandshakeState(HandshakeState state) {
+        this.handshakeState = state;
+    }
+
+    public HandshakeState getHandshakeState() {
+        return this.handshakeState;
+    }
 }

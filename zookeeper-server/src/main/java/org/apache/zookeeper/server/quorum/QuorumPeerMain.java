@@ -22,6 +22,8 @@ import java.io.IOException;
 import javax.management.JMException;
 import javax.security.sasl.SaslException;
 import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.zookeeper.audit.ZKAuditProvider;
+import org.apache.zookeeper.common.ConfigException;
 import org.apache.zookeeper.jmx.ManagedUtil;
 import org.apache.zookeeper.metrics.MetricsProvider;
 import org.apache.zookeeper.metrics.MetricsProviderLifeCycleException;
@@ -33,10 +35,11 @@ import org.apache.zookeeper.server.ServerMetrics;
 import org.apache.zookeeper.server.ZKDatabase;
 import org.apache.zookeeper.server.ZooKeeperServerMain;
 import org.apache.zookeeper.server.admin.AdminServer.AdminServerException;
+import org.apache.zookeeper.server.auth.ProviderRegistry;
 import org.apache.zookeeper.server.persistence.FileTxnSnapLog;
 import org.apache.zookeeper.server.persistence.FileTxnSnapLog.DatadirException;
-import org.apache.zookeeper.server.quorum.QuorumPeerConfig.ConfigException;
 import org.apache.zookeeper.server.util.JvmPauseMonitor;
+import org.apache.zookeeper.util.ServiceUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -49,8 +52,8 @@ import org.slf4j.LoggerFactory;
  * configuration information. This file is a Properties file, so keys and
  * values are separated by equals (=) and the key/value pairs are separated
  * by new lines. The following is a general summary of keys used in the
- * configuration file. For full details on this see the documentation in
- * docs/index.html
+ * configuration file. For full details see the
+ * <a href="https://zookeeper.apache.org/doc/current/admin-ops/administrators-guide/configuration-parameters">Administrator's Guide</a>.
  * <ol>
  * <li>dataDir - The directory where the ZooKeeper data is stored.</li>
  * <li>dataLogDir - The directory where the ZooKeeper transaction log is stored.</li>
@@ -90,25 +93,30 @@ public class QuorumPeerMain {
             LOG.error("Invalid arguments, exiting abnormally", e);
             LOG.info(USAGE);
             System.err.println(USAGE);
-            System.exit(ExitCode.INVALID_INVOCATION.getValue());
+            ZKAuditProvider.addServerStartFailureAuditLog();
+            ServiceUtils.requestSystemExit(ExitCode.INVALID_INVOCATION.getValue());
         } catch (ConfigException e) {
             LOG.error("Invalid config, exiting abnormally", e);
             System.err.println("Invalid config, exiting abnormally");
-            System.exit(ExitCode.INVALID_INVOCATION.getValue());
+            ZKAuditProvider.addServerStartFailureAuditLog();
+            ServiceUtils.requestSystemExit(ExitCode.INVALID_INVOCATION.getValue());
         } catch (DatadirException e) {
             LOG.error("Unable to access datadir, exiting abnormally", e);
             System.err.println("Unable to access datadir, exiting abnormally");
-            System.exit(ExitCode.UNABLE_TO_ACCESS_DATADIR.getValue());
+            ZKAuditProvider.addServerStartFailureAuditLog();
+            ServiceUtils.requestSystemExit(ExitCode.UNABLE_TO_ACCESS_DATADIR.getValue());
         } catch (AdminServerException e) {
             LOG.error("Unable to start AdminServer, exiting abnormally", e);
             System.err.println("Unable to start AdminServer, exiting abnormally");
-            System.exit(ExitCode.ERROR_STARTING_ADMIN_SERVER.getValue());
+            ZKAuditProvider.addServerStartFailureAuditLog();
+            ServiceUtils.requestSystemExit(ExitCode.ERROR_STARTING_ADMIN_SERVER.getValue());
         } catch (Exception e) {
             LOG.error("Unexpected exception, exiting abnormally", e);
-            System.exit(ExitCode.UNEXPECTED_ERROR.getValue());
+            ZKAuditProvider.addServerStartFailureAuditLog();
+            ServiceUtils.requestSystemExit(ExitCode.UNEXPECTED_ERROR.getValue());
         }
         LOG.info("Exiting normally");
-        System.exit(ExitCode.EXECUTION_FINISHED.getValue());
+        ServiceUtils.requestSystemExit(ExitCode.EXECUTION_FINISHED.getValue());
     }
 
     protected void initializeAndRun(String[] args) throws ConfigException, IOException, AdminServerException {
@@ -117,18 +125,18 @@ public class QuorumPeerMain {
             config.parse(args[0]);
         }
 
-        // Start and schedule the the purge task
+        // Start and schedule the purge task
         DatadirCleanupManager purgeMgr = new DatadirCleanupManager(
             config.getDataDir(),
             config.getDataLogDir(),
             config.getSnapRetainCount(),
-            config.getPurgeInterval());
+            config.getPurgeIntervalInMs());
         purgeMgr.start();
 
         if (args.length == 1 && config.isDistributed()) {
             runFromConfig(config);
         } else {
-            LOG.warn("Either no config or no quorum defined in config, running " + " in standalone mode");
+            LOG.warn("Either no config or no quorum defined in config, running in standalone mode");
             // there is only server in the quorum -- run as standalone
             ZooKeeperServerMain.main(args);
         }
@@ -141,8 +149,8 @@ public class QuorumPeerMain {
             LOG.warn("Unable to register log4j JMX control", e);
         }
 
-        LOG.info("Starting quorum peer");
-        MetricsProvider metricsProvider;
+        LOG.info("Starting quorum peer, myid=" + config.getServerId());
+        final MetricsProvider metricsProvider;
         try {
             metricsProvider = MetricsProviderBootstrap.startMetricsProvider(
                 config.getMetricsProviderClassName(),
@@ -152,6 +160,7 @@ public class QuorumPeerMain {
         }
         try {
             ServerMetrics.metricsProviderInitialized(metricsProvider);
+            ProviderRegistry.initialize();
             ServerCnxnFactory cnxnFactory = null;
             ServerCnxnFactory secureCnxnFactory = null;
 
@@ -181,6 +190,7 @@ public class QuorumPeerMain {
             quorumPeer.setObserverMasterPort(config.getObserverMasterPort());
             quorumPeer.setConfigFileName(config.getConfigFilename());
             quorumPeer.setClientPortListenBacklog(config.getClientPortListenBacklog());
+            quorumPeer.setMaxClientCnxns(config.getMaxClientCnxns());
             quorumPeer.setZKDatabase(new ZKDatabase(quorumPeer.getTxnFactory()));
             quorumPeer.setQuorumVerifier(config.getQuorumVerifier(), false);
             if (config.getLastSeenQuorumVerifier() != null) {
@@ -197,6 +207,9 @@ public class QuorumPeerMain {
             if (config.sslQuorumReloadCertFiles) {
                 quorumPeer.getX509Util().enableCertFileReloading();
             }
+            quorumPeer.setMultiAddressEnabled(config.isMultiAddressEnabled());
+            quorumPeer.setMultiAddressReachabilityCheckEnabled(config.isMultiAddressReachabilityCheckEnabled());
+            quorumPeer.setMultiAddressReachabilityCheckTimeoutMs(config.getMultiAddressReachabilityCheckTimeoutMs());
 
             // sets quorum sasl authentication configurations
             quorumPeer.setQuorumSaslEnabled(config.quorumEnableSasl);
@@ -215,17 +228,16 @@ public class QuorumPeerMain {
             }
 
             quorumPeer.start();
+            ZKAuditProvider.addZKStartStopAuditLog();
             quorumPeer.join();
         } catch (InterruptedException e) {
             // warn, but generally this is ok
             LOG.warn("Quorum Peer interrupted", e);
         } finally {
-            if (metricsProvider != null) {
-                try {
-                    metricsProvider.stop();
-                } catch (Throwable error) {
-                    LOG.warn("Error while stopping metrics", error);
-                }
+            try {
+                metricsProvider.stop();
+            } catch (Throwable error) {
+                LOG.warn("Error while stopping metrics", error);
             }
         }
     }
@@ -233,6 +245,25 @@ public class QuorumPeerMain {
     // @VisibleForTesting
     protected QuorumPeer getQuorumPeer() throws SaslException {
         return new QuorumPeer();
+    }
+
+    /**
+     * Shutdowns properly the service, this method is not a public API.
+     */
+    public void close() {
+        if (quorumPeer != null) {
+            try {
+                quorumPeer.shutdown();
+            } finally {
+                quorumPeer = null;
+            }
+        }
+    }
+
+    @Override
+    public String toString() {
+        QuorumPeer peer = quorumPeer;
+        return peer == null ? "" : peer.toString();
     }
 
 }

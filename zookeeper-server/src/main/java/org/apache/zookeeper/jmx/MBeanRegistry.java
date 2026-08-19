@@ -47,7 +47,7 @@ public class MBeanRegistry {
 
     private final Object LOCK = new Object();
 
-    private Map<ZKMBeanInfo, String> mapBean2Path = new ConcurrentHashMap<ZKMBeanInfo, String>();
+    private Map<ZKMBeanInfo, String> mapBean2Path = new ConcurrentHashMap<>();
 
     private MBeanServer mBeanServer;
 
@@ -107,7 +107,7 @@ public class MBeanRegistry {
                 mapBean2Path.put(bean, path);
             }
         } catch (JMException e) {
-            LOG.warn("Failed to register MBean " + bean.getName());
+            LOG.warn("Failed to register MBean {}", bean.getName());
             throw e;
         }
     }
@@ -135,7 +135,7 @@ public class MBeanRegistry {
      *         unregistered. Mainly for testing purposes.
      */
     public Set<ZKMBeanInfo> getRegisteredBeans() {
-        return new HashSet<ZKMBeanInfo>(mapBean2Path.keySet());
+        return new HashSet<>(mapBean2Path.keySet());
     }
 
     /**
@@ -215,7 +215,7 @@ public class MBeanRegistry {
         try {
             return new ObjectName(beanName.toString());
         } catch (MalformedObjectNameException e) {
-            LOG.warn("Invalid name \"" + beanName.toString() + "\" for class " + bean.getClass().toString());
+            LOG.warn("Invalid name \"{}\" for class {}", beanName, bean.getClass());
             throw e;
         }
     }

@@ -30,6 +30,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.text.DateFormat;
 import java.util.Date;
@@ -39,25 +40,32 @@ import java.util.zip.Adler32;
 import java.util.zip.Checksum;
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.CommandLineParser;
+import org.apache.commons.cli.DefaultParser;
 import org.apache.commons.cli.HelpFormatter;
 import org.apache.commons.cli.Option;
 import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
-import org.apache.commons.cli.PosixParser;
 import org.apache.jute.BinaryInputArchive;
 import org.apache.jute.BinaryOutputArchive;
 import org.apache.jute.Record;
+import org.apache.zookeeper.ZooDefs;
+import org.apache.zookeeper.server.ByteBufferInputStream;
 import org.apache.zookeeper.server.ExitCode;
-import org.apache.zookeeper.server.TraceFormatter;
+import org.apache.zookeeper.server.Request;
+import org.apache.zookeeper.server.TxnLogEntry;
 import org.apache.zookeeper.server.util.LogChopper;
 import org.apache.zookeeper.server.util.SerializeUtils;
+import org.apache.zookeeper.txn.CheckVersionTxn;
 import org.apache.zookeeper.txn.CreateContainerTxn;
 import org.apache.zookeeper.txn.CreateTTLTxn;
 import org.apache.zookeeper.txn.CreateTxn;
+import org.apache.zookeeper.txn.DeleteTxn;
+import org.apache.zookeeper.txn.ErrorTxn;
 import org.apache.zookeeper.txn.MultiTxn;
 import org.apache.zookeeper.txn.SetDataTxn;
 import org.apache.zookeeper.txn.Txn;
 import org.apache.zookeeper.txn.TxnHeader;
+import org.apache.zookeeper.util.ServiceUtils;
 
 public class TxnLogToolkit implements Closeable {
 
@@ -126,7 +134,7 @@ public class TxnLogToolkit implements Closeable {
             printHelpAndExit(e.getExitCode(), e.getOptions());
         } catch (TxnLogToolkitException e) {
             System.err.println(e.getMessage());
-            System.exit(e.getExitCode());
+            ServiceUtils.requestSystemExit(e.getExitCode());
         }
     }
 
@@ -282,8 +290,9 @@ public class TxnLogToolkit implements Closeable {
     }
 
     private void printTxn(byte[] bytes, String prefix) throws IOException {
-        TxnHeader hdr = new TxnHeader();
-        Record txn = SerializeUtils.deserializeTxn(bytes, hdr);
+        TxnLogEntry logEntry = SerializeUtils.deserializeTxn(bytes);
+        TxnHeader hdr = logEntry.getHeader();
+        Record txn = logEntry.getTxn();
         String txnStr = getFormattedTxnStr(txn);
         String txns = String.format(
             "%s session 0x%s cxid 0x%s zxid 0x%s %s %s",
@@ -291,7 +300,7 @@ public class TxnLogToolkit implements Closeable {
             Long.toHexString(hdr.getClientId()),
             Long.toHexString(hdr.getCxid()),
             Long.toHexString(hdr.getZxid()),
-            TraceFormatter.op2String(hdr.getType()),
+                Request.op2String(hdr.getType()),
             txnStr);
         if (prefix != null && !"".equals(prefix.trim())) {
             System.out.print(prefix + " - ");
@@ -304,11 +313,13 @@ public class TxnLogToolkit implements Closeable {
     }
 
     /**
-     * get the formatted string from the txn.
+     * Get the formatted string from the txn.
+     *
      * @param txn transaction log data
      * @return the formatted string
      */
-    private static String getFormattedTxnStr(Record txn) throws IOException {
+    // @VisibleForTesting
+    static String getFormattedTxnStr(Record txn) throws IOException {
         StringBuilder txnData = new StringBuilder();
         if (txn == null) {
             return txnData.toString();
@@ -331,25 +342,70 @@ public class TxnLogToolkit implements Closeable {
             txnData.append(createTTLTxn.getPath() + "," + checkNullToEmpty(createTTLTxn.getData()))
                    .append("," + createTTLTxn.getAcl() + "," + createTTLTxn.getParentCVersion())
                    .append("," + createTTLTxn.getTtl());
+        } else if (txn instanceof DeleteTxn) {
+            DeleteTxn deleteTxn = ((DeleteTxn) txn);
+            txnData.append(deleteTxn.getPath());
+        } else if (txn instanceof CheckVersionTxn) {
+            CheckVersionTxn checkVersionTxn = ((CheckVersionTxn) txn);
+            txnData.append(checkVersionTxn.getPath()).append(",").append(checkVersionTxn.getVersion());
         } else if (txn instanceof MultiTxn) {
             MultiTxn multiTxn = ((MultiTxn) txn);
             List<Txn> txnList = multiTxn.getTxns();
             for (int i = 0; i < txnList.size(); i++) {
                 Txn t = txnList.get(i);
                 if (i == 0) {
-                    txnData.append(TraceFormatter.op2String(t.getType()) + ":" + checkNullToEmpty(t.getData()));
+                    txnData.append(Request.op2String(t.getType())).append(":");
                 } else {
-                    txnData.append(";" + TraceFormatter.op2String(t.getType()) + ":" + checkNullToEmpty(t.getData()));
+                    txnData.append(";").append(Request.op2String(t.getType())).append(":");
+                }
+                if (t.getType() == ZooDefs.OpCode.error) {
+                    txnData.append(ByteBuffer.wrap(t.getData()).getInt());
+                } else {
+                    txnData.append(getFormattedTxnStr(deserializeSubTxn(t)));
                 }
             }
         } else {
-            txnData.append(txn.toString());
+            txnData.append(txn);
         }
 
         return txnData.toString();
     }
 
-    private static String checkNullToEmpty(byte[] data) throws IOException {
+    private static Record deserializeSubTxn(Txn txn) throws IOException {
+        Record record;
+        switch (txn.getType()) {
+            case ZooDefs.OpCode.create:
+            case ZooDefs.OpCode.create2:
+                record = new CreateTxn();
+                break;
+            case ZooDefs.OpCode.createTTL:
+                record = new CreateTTLTxn();
+                break;
+            case ZooDefs.OpCode.createContainer:
+                record = new CreateContainerTxn();
+                break;
+            case ZooDefs.OpCode.delete:
+            case ZooDefs.OpCode.deleteContainer:
+                record = new DeleteTxn();
+                break;
+            case ZooDefs.OpCode.setData:
+                record = new SetDataTxn();
+                break;
+            case ZooDefs.OpCode.error:
+                record = new ErrorTxn();
+                break;
+            case ZooDefs.OpCode.check:
+                record = new CheckVersionTxn();
+                break;
+            default:
+                throw new IOException("Unsupported Txn with type=" + txn.getType());
+        }
+        ByteBuffer bb = ByteBuffer.wrap(txn.getData());
+        ByteBufferInputStream.byteBuffer2Record(bb, record);
+        return record;
+    }
+
+    private static String checkNullToEmpty(byte[] data) {
         if (data == null || data.length == 0) {
             return "";
         }
@@ -380,7 +436,7 @@ public class TxnLogToolkit implements Closeable {
     }
 
     private static TxnLogToolkit parseCommandLine(String[] args) throws TxnLogToolkitException, FileNotFoundException {
-        CommandLineParser parser = new PosixParser();
+        CommandLineParser parser = new DefaultParser();
         Options options = new Options();
 
         Option helpOpt = new Option("h", "help", false, "Print help message");
@@ -424,7 +480,7 @@ public class TxnLogToolkit implements Closeable {
     private static void printHelpAndExit(int exitCode, Options options) {
         HelpFormatter help = new HelpFormatter();
         help.printHelp(120, "TxnLogToolkit [-dhrvc] <txn_log_file_name> (-z <zxid>)", "", options, "");
-        System.exit(exitCode);
+        ServiceUtils.requestSystemExit(exitCode);
     }
 
     private void printStat() {

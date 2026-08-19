@@ -20,8 +20,9 @@ package org.apache.zookeeper.server.quorum;
 
 import java.io.IOException;
 import java.io.PrintWriter;
-import java.nio.ByteBuffer;
+import java.util.Objects;
 import java.util.function.BiConsumer;
+import java.util.stream.Collectors;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.MultiOperationRecord;
@@ -29,12 +30,13 @@ import org.apache.zookeeper.Op;
 import org.apache.zookeeper.ZooDefs.OpCode;
 import org.apache.zookeeper.metrics.MetricsContext;
 import org.apache.zookeeper.proto.CreateRequest;
-import org.apache.zookeeper.server.ByteBufferInputStream;
 import org.apache.zookeeper.server.Request;
+import org.apache.zookeeper.server.RequestRecord;
 import org.apache.zookeeper.server.ServerMetrics;
 import org.apache.zookeeper.server.ZKDatabase;
 import org.apache.zookeeper.server.ZooKeeperServer;
 import org.apache.zookeeper.server.persistence.FileTxnSnapLog;
+import org.apache.zookeeper.txn.CreateSessionTxn;
 
 /**
  * Abstract base class for all ZooKeeperServers that participate in
@@ -45,8 +47,10 @@ public abstract class QuorumZooKeeperServer extends ZooKeeperServer {
     public final QuorumPeer self;
     protected UpgradeableSessionTracker upgradeableSessionTracker;
 
-    protected QuorumZooKeeperServer(FileTxnSnapLog logFactory, int tickTime, int minSessionTimeout, int maxSessionTimeout, int listenBacklog, ZKDatabase zkDb, QuorumPeer self) {
-        super(logFactory, tickTime, minSessionTimeout, maxSessionTimeout, listenBacklog, zkDb, self.getInitialConfig());
+    protected QuorumZooKeeperServer(FileTxnSnapLog logFactory, int tickTime, int minSessionTimeout,
+                                    int maxSessionTimeout, int listenBacklog, ZKDatabase zkDb, QuorumPeer self) {
+        super(logFactory, tickTime, minSessionTimeout, maxSessionTimeout, listenBacklog, zkDb, self.getInitialConfig(),
+              self.isReconfigEnabled());
         this.self = self;
     }
 
@@ -57,6 +61,10 @@ public abstract class QuorumZooKeeperServer extends ZooKeeperServer {
     }
 
     public Request checkUpgradeSession(Request request) throws IOException, KeeperException {
+        if (request.isThrottled()) {
+            return null;
+        }
+
         // If this is a request for a local session and it is to
         // create an ephemeral node, then upgrade the session and return
         // a new session request for the leader.
@@ -69,10 +77,7 @@ public abstract class QuorumZooKeeperServer extends ZooKeeperServer {
         }
 
         if (OpCode.multi == request.type) {
-            MultiOperationRecord multiTransactionRecord = new MultiOperationRecord();
-            request.request.rewind();
-            ByteBufferInputStream.byteBuffer2Record(request.request, multiTransactionRecord);
-            request.request.rewind();
+            MultiOperationRecord multiTransactionRecord = request.readRequestRecord(MultiOperationRecord::new);
             boolean containsEphemeralCreate = false;
             for (Op op : multiTransactionRecord) {
                 if (op.getType() == OpCode.create || op.getType() == OpCode.create2) {
@@ -88,10 +93,7 @@ public abstract class QuorumZooKeeperServer extends ZooKeeperServer {
                 return null;
             }
         } else {
-            CreateRequest createRequest = new CreateRequest();
-            request.request.rewind();
-            ByteBufferInputStream.byteBuffer2Record(request.request, createRequest);
-            request.request.rewind();
+            CreateRequest createRequest = request.readRequestRecord(CreateRequest::new);
             CreateMode createMode = CreateMode.fromFlag(createRequest.getFlags());
             if (!createMode.isEphemeral()) {
                 return null;
@@ -113,9 +115,8 @@ public abstract class QuorumZooKeeperServer extends ZooKeeperServer {
         synchronized (upgradeableSessionTracker) {
             if (upgradeableSessionTracker.isLocalSession(sessionId)) {
                 int timeout = upgradeableSessionTracker.upgradeSession(sessionId);
-                ByteBuffer to = ByteBuffer.allocate(4);
-                to.putInt(timeout);
-                return new Request(null, sessionId, 0, OpCode.createSession, to, null);
+                CreateSessionTxn txn = new CreateSessionTxn(timeout);
+                return new Request(null, sessionId, 0, OpCode.createSession, RequestRecord.fromRecord(txn), null);
             }
         }
         return null;
@@ -129,7 +130,7 @@ public abstract class QuorumZooKeeperServer extends ZooKeeperServer {
     public void upgrade(long sessionId) {
         Request request = makeUpgradeRequest(sessionId);
         if (request != null) {
-            LOG.info("Upgrading session 0x" + Long.toHexString(sessionId));
+            LOG.info("Upgrading session 0x{}", Long.toHexString(sessionId));
             // This must be a global request
             submitRequest(request);
         }
@@ -152,9 +153,7 @@ public abstract class QuorumZooKeeperServer extends ZooKeeperServer {
                 si.setLocalSession(true);
                 reqType = "local";
             }
-            LOG.info("Submitting " + reqType
-                     + " closeSession request"
-                     + " for session 0x" + Long.toHexString(si.sessionId));
+            LOG.info("Submitting {} closeSession request for session 0x{}", reqType, Long.toHexString(si.sessionId));
             break;
         default:
             break;
@@ -172,13 +171,15 @@ public abstract class QuorumZooKeeperServer extends ZooKeeperServer {
         pwriter.print("electionAlg=");
         pwriter.println(self.getElectionType());
         pwriter.print("electionPort=");
-        pwriter.println(self.getElectionAddress().getPort());
+        pwriter.println(self.getElectionAddress().getAllPorts()
+                .stream().map(Objects::toString).collect(Collectors.joining("|")));
         pwriter.print("quorumPort=");
-        pwriter.println(self.getQuorumAddress().getPort());
+        pwriter.println(self.getQuorumAddress().getAllPorts()
+                        .stream().map(Objects::toString).collect(Collectors.joining("|")));
         pwriter.print("peerType=");
         pwriter.println(self.getLearnerType().ordinal());
         pwriter.println("membership: ");
-        pwriter.print(new String(self.getQuorumVerifier().toString().getBytes()));
+        pwriter.print(self.getQuorumVerifier().toString());
     }
 
     @Override

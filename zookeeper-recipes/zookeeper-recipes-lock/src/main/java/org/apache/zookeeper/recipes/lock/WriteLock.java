@@ -57,7 +57,7 @@ public class WriteLock extends ProtocolSupport {
     private LockZooKeeperOperation zop;
 
     /**
-     * zookeeper contructor for writelock.
+     * zookeeper constructor for writelock.
      *
      * @param zookeeper zookeeper client instance
      * @param dir the parent path you want to use for locking
@@ -73,7 +73,7 @@ public class WriteLock extends ProtocolSupport {
     }
 
     /**
-     * zookeeper contructor for writelock with callback.
+     * zookeeper constructor for writelock with callback.
      *
      * @param zookeeper the zookeeper client instance
      * @param dir the parent path you want to use for locking
@@ -130,13 +130,13 @@ public class WriteLock extends ProtocolSupport {
                 };
                 zopdel.execute();
             } catch (InterruptedException e) {
-                LOG.warn("Caught: " + e, e);
-                //set that we have been interrupted.
+                LOG.warn("Unexpected exception", e);
+                // set that we have been interrupted.
                 Thread.currentThread().interrupt();
             } catch (KeeperException.NoNodeException e) {
                 // do nothing
             } catch (KeeperException e) {
-                LOG.warn("Caught: " + e, e);
+                LOG.warn("Unexpected exception", e);
                 throw new RuntimeException(e.getMessage(), e);
             } finally {
                 LockListener lockListener = getLockListener();
@@ -161,23 +161,23 @@ public class WriteLock extends ProtocolSupport {
             try {
                 lock();
             } catch (Exception e) {
-                LOG.warn("Failed to acquire lock: " + e, e);
+                LOG.warn("Failed to acquire lock", e);
             }
         }
 
     }
 
     /**
-     * a zoookeeper operation that is mainly responsible
+     * a zookeeper operation that is mainly responsible
      * for all the magic required for locking.
      */
     private class LockZooKeeperOperation implements ZooKeeperOperation {
 
         /**
-         * find if we have been created earler if not create our node.
+         * find if we have been created earlier if not create our node.
          *
          * @param prefix the prefix node
-         * @param zookeeper teh zookeeper client
+         * @param zookeeper the zookeeper client
          * @param dir the dir paretn
          * @throws KeeperException
          * @throws InterruptedException
@@ -221,11 +221,11 @@ public class WriteLock extends ProtocolSupport {
                 }
                 List<String> names = zookeeper.getChildren(dir, false);
                 if (names.isEmpty()) {
-                    LOG.warn("No children in: " + dir + " when we've just created one! Lets recreate it...");
+                    LOG.warn("No children in: {} when we've just created one! Lets recreate it...", dir);
                     // lets force the recreation of the id
                     id = null;
                 } else {
-                    // lets sort them explicitly (though they do seem to come back in order ususally :)
+                    // lets sort them explicitly (though they do seem to come back in order usually :)
                     SortedSet<ZNodeName> sortedNames = new TreeSet<>();
                     for (String name : names) {
                         sortedNames.add(new ZNodeName(dir + "/" + name));
@@ -235,12 +235,12 @@ public class WriteLock extends ProtocolSupport {
                     if (!lessThanMe.isEmpty()) {
                         ZNodeName lastChildName = lessThanMe.last();
                         lastChildId = lastChildName.getName();
-                        LOG.debug("watching less than me node: {}", lastChildId);
+                        LOG.debug("Watching less than me node: {}", lastChildId);
                         Stat stat = zookeeper.exists(lastChildId, new LockWatcher());
                         if (stat != null) {
                             return Boolean.FALSE;
                         } else {
-                            LOG.warn("Could not find the stats for less than me: " + lastChildName.getName());
+                            LOG.warn("Could not find the stats for less than me: {}", lastChildName.getName());
                         }
                     } else {
                         if (isOwner()) {

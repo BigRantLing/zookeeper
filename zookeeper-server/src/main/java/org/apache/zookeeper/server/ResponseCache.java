@@ -22,30 +22,40 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.apache.zookeeper.data.Stat;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @SuppressWarnings("serial")
 public class ResponseCache {
+    private static final Logger LOG = LoggerFactory.getLogger(ResponseCache.class);
 
     // Magic number chosen to be "big enough but not too big"
-    private static final int DEFAULT_RESPONSE_CACHE_SIZE = 400;
-
+    public static final int DEFAULT_RESPONSE_CACHE_SIZE = 400;
+    private final int cacheSize;
     private static class Entry {
+        public final Stat stat;
+        public final byte[] data;
 
-        public Stat stat;
-        public byte[] data;
-
+        Entry(Stat stat, byte[] data) {
+            this.stat = stat;
+            this.data = data;
+        }
     }
 
-    private Map<String, Entry> cache = Collections.synchronizedMap(new LRUCache<String, Entry>(getResponseCacheSize()));
+    private final Map<String, Entry> cache;
 
-    public ResponseCache() {
+    public ResponseCache(int cacheSize, String requestType) {
+        this.cacheSize = cacheSize;
+        cache = Collections.synchronizedMap(new LRUCache<>(cacheSize));
+        LOG.info("{} response cache size is initialized with value {}.", requestType, cacheSize);
+    }
+
+    public int getCacheSize() {
+        return cacheSize;
     }
 
     public void put(String path, byte[] data, Stat stat) {
-        Entry entry = new Entry();
-        entry.data = data;
-        entry.stat = stat;
-        cache.put(path, entry);
+        cache.put(path, new Entry(stat, data));
     }
 
     public byte[] get(String key, Stat stat) {
@@ -62,20 +72,16 @@ public class ResponseCache {
         }
     }
 
-    private static int getResponseCacheSize() {
-        return Integer.getInteger("zookeeper.maxResponseCacheSize", DEFAULT_RESPONSE_CACHE_SIZE);
-    }
-
-    public static boolean isEnabled() {
-        return getResponseCacheSize() > 0;
+    public boolean isEnabled() {
+        return cacheSize > 0;
     }
 
     private static class LRUCache<K, V> extends LinkedHashMap<K, V> {
 
-        private int cacheSize;
+        private final int cacheSize;
 
         LRUCache(int cacheSize) {
-            super(cacheSize / 4);
+            super(cacheSize / 4, 0.75f, true);
             this.cacheSize = cacheSize;
         }
 

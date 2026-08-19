@@ -22,7 +22,6 @@ import java.io.IOException;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import javax.management.JMException;
-import org.apache.jute.Record;
 import org.apache.zookeeper.jmx.MBeanRegistry;
 import org.apache.zookeeper.metrics.MetricsContext;
 import org.apache.zookeeper.server.ExitCode;
@@ -33,7 +32,7 @@ import org.apache.zookeeper.server.ServerMetrics;
 import org.apache.zookeeper.server.SyncRequestProcessor;
 import org.apache.zookeeper.server.ZKDatabase;
 import org.apache.zookeeper.server.persistence.FileTxnSnapLog;
-import org.apache.zookeeper.txn.TxnHeader;
+import org.apache.zookeeper.util.ServiceUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -57,7 +56,7 @@ public class FollowerZooKeeperServer extends LearnerZooKeeperServer {
      */
     FollowerZooKeeperServer(FileTxnSnapLog logFactory, QuorumPeer self, ZKDatabase zkDb) throws IOException {
         super(logFactory, self.tickTime, self.minSessionTimeout, self.maxSessionTimeout, self.clientPortListenBacklog, zkDb, self);
-        this.pendingSyncs = new ConcurrentLinkedQueue<Request>();
+        this.pendingSyncs = new ConcurrentLinkedQueue<>();
     }
 
     public Follower getFollower() {
@@ -75,14 +74,20 @@ public class FollowerZooKeeperServer extends LearnerZooKeeperServer {
         syncProcessor.start();
     }
 
-    LinkedBlockingQueue<Request> pendingTxns = new LinkedBlockingQueue<Request>();
+    LinkedBlockingQueue<Request> pendingTxns = new LinkedBlockingQueue<>();
 
-    public void logRequest(TxnHeader hdr, Record txn) {
-        Request request = new Request(hdr.getClientId(), hdr.getCxid(), hdr.getType(), hdr, txn, hdr.getZxid());
+    public void logRequest(Request request) {
         if ((request.zxid & 0xffffffffL) != 0) {
             pendingTxns.add(request);
         }
         syncProcessor.processRequest(request);
+    }
+
+    /**
+     * Append txn request to the transaction log directly without go through request processors.
+     */
+    public void appendRequest(Request request) throws IOException {
+        getZKDatabase().append(request);
     }
 
     /**
@@ -100,7 +105,7 @@ public class FollowerZooKeeperServer extends LearnerZooKeeperServer {
         if (firstElementZxid != zxid) {
             LOG.error("Committing zxid 0x" + Long.toHexString(zxid)
                       + " but next pending txn 0x" + Long.toHexString(firstElementZxid));
-            System.exit(ExitCode.UNMATCHED_TXN_COMMIT.getValue());
+            ServiceUtils.requestSystemExit(ExitCode.UNMATCHED_TXN_COMMIT.getValue());
         }
         Request request = pendingTxns.remove();
         request.logLatency(ServerMetrics.getMetrics().COMMIT_PROPAGATION_LATENCY);
@@ -177,5 +182,4 @@ public class FollowerZooKeeperServer extends LearnerZooKeeperServer {
         rootContext.unregisterGauge("synced_observers");
 
     }
-
 }

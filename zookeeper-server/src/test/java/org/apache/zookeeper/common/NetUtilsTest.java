@@ -18,13 +18,13 @@
 
 package org.apache.zookeeper.common;
 
-import static org.hamcrest.CoreMatchers.anyOf;
 import static org.hamcrest.CoreMatchers.equalTo;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertThat;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import java.net.InetSocketAddress;
 import org.apache.zookeeper.ZKTestCase;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 public class NetUtilsTest extends ZKTestCase {
 
@@ -39,7 +39,7 @@ public class NetUtilsTest extends ZKTestCase {
     @Test
     public void testFormatInetAddrGoodIpv4() {
         InetSocketAddress isa = new InetSocketAddress(v4addr, port);
-        assertEquals("127.0.0.1:1234", NetUtils.formatInetAddr(isa));
+        assertEquals(v4local, NetUtils.formatInetAddr(isa));
     }
 
     @Test
@@ -59,14 +59,66 @@ public class NetUtilsTest extends ZKTestCase {
     @Test
     public void testFormatInetAddrGoodHostname() {
         InetSocketAddress isa = new InetSocketAddress("localhost", 1234);
-
-        assertThat(NetUtils.formatInetAddr(isa), anyOf(equalTo(v4local), equalTo(v6local)));
+        assertThat(NetUtils.formatInetAddr(isa), equalTo("localhost:1234"));
     }
 
     @Test
     public void testFormatAddrUnresolved() {
         InetSocketAddress isa = InetSocketAddress.createUnresolved("doesnt.exist.com", 1234);
         assertEquals("doesnt.exist.com:1234", NetUtils.formatInetAddr(isa));
+    }
+
+    @Test
+    public void tetGetIPV6HostAndPort_WhenHostDoesNotEndWithBracket() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            NetUtils.getIPV6HostAndPort("[2001:0db8:85a3:0000:0000:8a2e:0370:7334:443");
+        });
+    }
+
+    @Test
+    public void tetGetIPV6HostAndPort_WhenNoPortAfterColon() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            NetUtils.getIPV6HostAndPort("[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:");
+        });
+    }
+
+    @Test
+    public void tetGetIPV6HostAndPort_WhenPortIsNotSeparatedProperly() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            NetUtils.getIPV6HostAndPort("[2001:0db8:85a3:0000:0000:8a2e:0370:7334]2181");
+        });
+    }
+
+    @Test
+    public void tetGetIPV6HostAndPort_WhenHostIsEmpty() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            NetUtils.getIPV6HostAndPort("[]:2181");
+        });
+    }
+
+    @Test
+    public void tetGetIPV6HostAndPort_EmptyStringArrayIfDoesNotStartWithBracket() {
+        String[] ipv6HostAndPort =
+            NetUtils.getIPV6HostAndPort("2001:0db8:85a3:0000:0000:8a2e:0370:7334]");
+        assertEquals(0, ipv6HostAndPort.length);
+    }
+
+    @Test
+    public void tetGetIPV6HostAndPort_ReturnHostPort() {
+        String[] ipv6HostAndPort =
+            NetUtils.getIPV6HostAndPort("[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:2181");
+        assertEquals(2, ipv6HostAndPort.length);
+        assertEquals("2001:0db8:85a3:0000:0000:8a2e:0370:7334", ipv6HostAndPort[0]);
+        assertEquals("2181", ipv6HostAndPort[1]);
+    }
+
+    @Test
+    public void tetGetIPV6HostAndPort_ReturnHostPortPort() {
+        String[] ipv6HostAndPort =
+            NetUtils.getIPV6HostAndPort("[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:2181:3181");
+        assertEquals(2, ipv6HostAndPort.length);
+        assertEquals("2001:0db8:85a3:0000:0000:8a2e:0370:7334", ipv6HostAndPort[0]);
+        assertEquals("2181:3181", ipv6HostAndPort[1]);
     }
 
 }

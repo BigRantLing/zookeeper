@@ -19,6 +19,7 @@
 package org.apache.zookeeper.server.quorum;
 
 import org.apache.zookeeper.jmx.ZKMBeanInfo;
+import org.apache.zookeeper.server.ZooKeeperServer;
 
 public class QuorumBean implements QuorumMXBean, ZKMBeanInfo {
 
@@ -27,7 +28,7 @@ public class QuorumBean implements QuorumMXBean, ZKMBeanInfo {
 
     public QuorumBean(QuorumPeer peer) {
         this.peer = peer;
-        name = "ReplicatedServer_id" + peer.getId();
+        name = "ReplicatedServer_id" + peer.getMyId();
     }
 
     @Override
@@ -81,4 +82,13 @@ public class QuorumBean implements QuorumMXBean, ZKMBeanInfo {
         Observer.setObserverElectionDelayMs(delayMS);
     }
 
+    @Override
+    public boolean getDigestEnabled() {
+        return ZooKeeperServer.isDigestEnabled();
+    }
+
+    @Override
+    public void disableDigest() {
+        ZooKeeperServer.setDigestEnabled(false);
+    }
 }

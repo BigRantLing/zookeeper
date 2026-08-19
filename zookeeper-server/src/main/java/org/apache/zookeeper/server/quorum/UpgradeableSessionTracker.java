@@ -18,6 +18,8 @@
 
 package org.apache.zookeeper.server.quorum;
 
+import java.util.Collections;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import org.apache.zookeeper.KeeperException;
@@ -42,9 +44,9 @@ public abstract class UpgradeableSessionTracker implements SessionTracker {
     }
 
     public void createLocalSessionTracker(SessionExpirer expirer, int tickTime, long id, ZooKeeperServerListener listener) {
-        this.localSessionsWithTimeouts = new ConcurrentHashMap<Long, Integer>();
+        this.localSessionsWithTimeouts = new ConcurrentHashMap<>();
         this.localSessionTracker = new LocalSessionTracker(expirer, this.localSessionsWithTimeouts, tickTime, id, listener);
-        this.upgradingSessions = new ConcurrentHashMap<Long, Integer>();
+        this.upgradingSessions = new ConcurrentHashMap<>();
     }
 
     public boolean isTrackingSession(long sessionId) {
@@ -53,6 +55,11 @@ public abstract class UpgradeableSessionTracker implements SessionTracker {
 
     public boolean isLocalSession(long sessionId) {
         return localSessionTracker != null && localSessionTracker.isTrackingSession(sessionId);
+    }
+
+    @Override
+    public boolean isLocalSessionsEnabled() {
+        return localSessionsEnabled;
     }
 
     public boolean isUpgradingSession(long sessionId) {
@@ -84,7 +91,7 @@ public abstract class UpgradeableSessionTracker implements SessionTracker {
         // will get the timeout from the map
         Integer timeout = localSessionsWithTimeouts.remove(sessionId);
         if (timeout != null) {
-            LOG.info("Upgrading session 0x" + Long.toHexString(sessionId));
+            LOG.info("Upgrading session 0x{}", Long.toHexString(sessionId));
             // Track global session, which will add to global session tracker
             // on leader and do nothing on learner. Need to start track global
             // session in leader now to update the session expire between
@@ -106,7 +113,8 @@ public abstract class UpgradeableSessionTracker implements SessionTracker {
         localSessionTracker.removeSession(sessionId);
     }
 
-    public void checkGlobalSession(long sessionId, Object owner) throws KeeperException.SessionExpiredException, KeeperException.SessionMovedException {
+    public void checkGlobalSession(long sessionId, Object owner)
+        throws KeeperException.SessionExpiredException, KeeperException.SessionMovedException {
         throw new UnsupportedOperationException();
     }
 
@@ -117,4 +125,8 @@ public abstract class UpgradeableSessionTracker implements SessionTracker {
         return localSessionsWithTimeouts.size();
     }
 
+    public Set<Long> localSessions() {
+        return (localSessionTracker == null) ? Collections.<Long>emptySet()
+            : localSessionTracker.localSessions();
+    }
 }

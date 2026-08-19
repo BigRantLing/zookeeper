@@ -18,7 +18,6 @@
 
 package org.apache.zookeeper.server;
 
-import java.nio.ByteBuffer;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.Set;
@@ -26,6 +25,7 @@ import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import org.apache.zookeeper.DeleteContainerRequest;
 import org.apache.zookeeper.ZooDefs;
 import org.apache.zookeeper.common.Time;
 import org.slf4j.Logger;
@@ -46,25 +46,55 @@ public class ContainerManager {
     private final RequestProcessor requestProcessor;
     private final int checkIntervalMs;
     private final int maxPerMinute;
+    private final long maxNeverUsedIntervalMs;
     private final Timer timer;
-    private final AtomicReference<TimerTask> task = new AtomicReference<TimerTask>(null);
+    private final AtomicReference<TimerTask> task = new AtomicReference<>(null);
 
     /**
      * @param zkDb the ZK database
-     * @param requestProcessor request processer - used to inject delete
+     * @param requestProcessor request processor - used to inject delete
+     *                         container requests
+     */
+    public ContainerManager(ZKDatabase zkDb, RequestProcessor requestProcessor) {
+        this(
+            zkDb, requestProcessor,
+            Integer.getInteger("znode.container.checkIntervalMs", (int) TimeUnit.MINUTES.toMillis(1)),
+            Integer.getInteger("znode.container.maxPerMinute", 10000),
+            Long.getLong("znode.container.maxNeverUsedIntervalMs", TimeUnit.MINUTES.toMillis(5))
+        );
+    }
+
+    /**
+     * @param zkDb the ZK database
+     * @param requestProcessor request processor - used to inject delete
      *                         container requests
      * @param checkIntervalMs how often to check containers in milliseconds
      * @param maxPerMinute the max containers to delete per second - avoids
      *                     herding of container deletions
      */
     public ContainerManager(ZKDatabase zkDb, RequestProcessor requestProcessor, int checkIntervalMs, int maxPerMinute) {
+        this(zkDb, requestProcessor, checkIntervalMs, maxPerMinute, 0);
+    }
+
+    /**
+     * @param zkDb the ZK database
+     * @param requestProcessor request processor - used to inject delete
+     *                         container requests
+     * @param checkIntervalMs how often to check containers in milliseconds
+     * @param maxPerMinute the max containers to delete per second - avoids
+     *                     herding of container deletions
+     * @param maxNeverUsedIntervalMs the max time in milliseconds that a container that has never had
+     *                                  any children is retained
+     */
+    public ContainerManager(ZKDatabase zkDb, RequestProcessor requestProcessor, int checkIntervalMs, int maxPerMinute, long maxNeverUsedIntervalMs) {
         this.zkDb = zkDb;
         this.requestProcessor = requestProcessor;
         this.checkIntervalMs = checkIntervalMs;
         this.maxPerMinute = maxPerMinute;
+        this.maxNeverUsedIntervalMs = maxNeverUsedIntervalMs;
         timer = new Timer("ContainerManagerTask", true);
 
-        LOG.info(String.format("Using checkIntervalMs=%d maxPerMinute=%d", checkIntervalMs, maxPerMinute));
+        LOG.info("Using checkIntervalMs={} maxPerMinute={} maxNeverUsedIntervalMs={}", checkIntervalMs, maxPerMinute, maxNeverUsedIntervalMs);
     }
 
     /**
@@ -112,11 +142,11 @@ public class ContainerManager {
         for (String containerPath : getCandidates()) {
             long startMs = Time.currentElapsedTime();
 
-            ByteBuffer path = ByteBuffer.wrap(containerPath.getBytes());
-            Request request = new Request(null, 0, 0, ZooDefs.OpCode.deleteContainer, path, null);
+            DeleteContainerRequest record = new DeleteContainerRequest(containerPath);
+            Request request = new Request(null, 0, 0, ZooDefs.OpCode.deleteContainer, RequestRecord.fromRecord(record), null);
             try {
                 LOG.info("Attempting to delete candidate container: {}", containerPath);
-                requestProcessor.processRequest(request);
+                postDeleteRequest(request);
             } catch (Exception e) {
                 LOG.error("Could not delete container: {}", containerPath, e);
             }
@@ -130,23 +160,51 @@ public class ContainerManager {
     }
 
     // VisibleForTesting
+    protected void postDeleteRequest(Request request) throws RequestProcessor.RequestProcessorException {
+        requestProcessor.processRequest(request);
+    }
+
+    // VisibleForTesting
     protected long getMinIntervalMs() {
         return TimeUnit.MINUTES.toMillis(1) / maxPerMinute;
     }
 
+    int getMaxPerMinute() {
+        return maxPerMinute;
+    }
+
+    int getCheckIntervalMs() {
+        return checkIntervalMs;
+    }
+
+    long getMaxNeverUsedIntervalMs() {
+        return maxNeverUsedIntervalMs;
+    }
+
     // VisibleForTesting
     protected Collection<String> getCandidates() {
-        Set<String> candidates = new HashSet<String>();
+        Set<String> candidates = new HashSet<>();
         for (String containerPath : zkDb.getDataTree().getContainers()) {
             DataNode node = zkDb.getDataTree().getNode(containerPath);
-            /*
-                cversion > 0: keep newly created containers from being deleted
-                before any children have been added. If you were to create the
-                container just before a container cleaning period the container
-                would be immediately be deleted.
-             */
-            if ((node != null) && (node.stat.getCversion() > 0) && (node.getChildren().isEmpty())) {
-                candidates.add(containerPath);
+            if ((node != null) && node.getChildren().isEmpty()) {
+                /*
+                    cversion > 0: keep newly created containers from being deleted
+                    before any children have been added. If you were to create the
+                    container just before a container cleaning period the container
+                    would be immediately be deleted.
+                 */
+                if (node.stat.getCversion() > 0) {
+                    candidates.add(containerPath);
+                } else {
+                    /*
+                        Users may not want unused containers to live indefinitely. Allow a system
+                        property to be set that sets the max time for a cversion-0 container
+                        to stay before being deleted
+                     */
+                    if ((maxNeverUsedIntervalMs != 0) && (getElapsed(node) > maxNeverUsedIntervalMs)) {
+                        candidates.add(containerPath);
+                    }
+                }
             }
         }
         for (String ttlPath : zkDb.getDataTree().getTtls()) {
@@ -155,7 +213,6 @@ public class ContainerManager {
                 Set<String> children = node.getChildren();
                 if (children.isEmpty()) {
                     if (EphemeralType.get(node.stat.getEphemeralOwner()) == EphemeralType.TTL) {
-                        long elapsed = getElapsed(node);
                         long ttl = EphemeralType.TTL.getValue(node.stat.getEphemeralOwner());
                         if ((ttl != 0) && (getElapsed(node) > ttl)) {
                             candidates.add(ttlPath);

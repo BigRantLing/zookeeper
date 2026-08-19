@@ -41,7 +41,7 @@ import org.apache.zookeeper.common.PathUtils;
 import org.apache.zookeeper.server.admin.JettyAdminServer;
 import org.apache.zookeeper.test.ClientBase;
 import org.apache.zookeeper.test.QuorumBase;
-import org.junit.After;
+import org.junit.jupiter.api.AfterEach;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -58,16 +58,19 @@ public class QuorumPeerTestBase extends ZKTestCase implements Watcher {
     protected Servers servers;
     protected int numServers = 0;
 
-    @After
+    @AfterEach
     public void tearDown() throws Exception {
-        if (servers == null || servers.mt == null) {
+        if (servers == null) {
             LOG.info("No servers to shutdown!");
             return;
         }
-        for (int i = 0; i < numServers; i++) {
-            if (i < servers.mt.length) {
-                servers.mt[i].shutdown();
-            }
+
+        if (servers.zk != null) {
+            servers.shutdownAllClients();
+        }
+
+        if (servers.mt != null) {
+            servers.shutDownAllServers();
         }
     }
 
@@ -92,7 +95,7 @@ public class QuorumPeerTestBase extends ZKTestCase implements Watcher {
         final File tmpDir;
 
         public static final int UNSET_STATIC_CLIENTPORT = -1;
-        // standalone mode doens't need myid
+        // standalone mode doesn't need myid
         public static final int UNSET_MYID = -1;
 
         volatile TestQPMain main;
@@ -119,7 +122,7 @@ public class QuorumPeerTestBase extends ZKTestCase implements Watcher {
             this.clientPort = clientPort;
             this.quorumCfgSection = quorumCfgSection;
             this.otherConfigs = otherConfigs;
-            LOG.info("id = " + myid + " tmpDir = " + baseDir + " clientPort = " + clientPort);
+            LOG.info("id = {} tmpDir = {} clientPort = {}", myid, baseDir, clientPort);
             confFile = new File(baseDir, "zoo.cfg");
 
             FileWriter fwriter = new FileWriter(confFile);
@@ -202,10 +205,7 @@ public class QuorumPeerTestBase extends ZKTestCase implements Watcher {
 
         public MainThread(int myid, int clientPort, int adminServerPort, Integer secureClientPort, String quorumCfgSection, String configs, String peerType, boolean writeDynamicConfigFile, String version) throws IOException {
             tmpDir = ClientBase.createTmpDir();
-            LOG.info("id = " + myid
-                     + " tmpDir = " + tmpDir
-                     + " clientPort = " + clientPort
-                     + " adminServerPort = " + adminServerPort);
+            LOG.info("id = {} tmpDir = {} clientPort = {} adminServerPort = {}", myid, tmpDir, clientPort, adminServerPort);
 
             File dataDir = new File(tmpDir, "data");
             if (!dataDir.mkdir()) {
@@ -306,7 +306,7 @@ public class QuorumPeerTestBase extends ZKTestCase implements Watcher {
         }
 
         public MainThread(int myid, int clientPort, String quorumCfgSection) throws IOException {
-            this(myid, clientPort, quorumCfgSection, new HashMap<String, String>());
+            this(myid, clientPort, quorumCfgSection, new HashMap<>());
         }
 
         public MainThread(int myid, int clientPort, String quorumCfgSection, Map<String, String> otherConfigs) throws IOException {
@@ -317,6 +317,18 @@ public class QuorumPeerTestBase extends ZKTestCase implements Watcher {
 
         public synchronized void start() {
             main = getTestQPMain();
+            currentThread = new Thread(this);
+            currentThread.start();
+        }
+
+        /**
+         * start the QuorumPeer with the passed TestQPMain
+         *
+         * @param testQPMain the TestQPMain to use
+         */
+
+        public synchronized void start(final TestQPMain testQPMain) {
+            main = testQPMain;
             currentThread = new Thread(this);
             currentThread.start();
         }
@@ -359,7 +371,7 @@ public class QuorumPeerTestBase extends ZKTestCase implements Watcher {
         }
 
         public void reinitialize() throws IOException {
-            File dataDir = main.quorumPeer.getTxnFactory().getDataDir();
+            File dataDir = main.quorumPeer.getTxnFactory().getDataLogDir();
             ClientBase.recursiveDelete(dataDir);
             ClientBase.createInitializeFile(dataDir.getParentFile());
         }
@@ -405,11 +417,12 @@ public class QuorumPeerTestBase extends ZKTestCase implements Watcher {
     }
 
     // This class holds the servers and clients for those servers
-    protected static class Servers {
+    public static class Servers {
 
-        MainThread[] mt;
-        ZooKeeper[] zk;
-        int[] clientPorts;
+        public MainThread[] mt;
+        public ZooKeeper[] zk;
+        public int[] clientPorts;
+        public int[] adminPorts;
 
         public void shutDownAllServers() throws InterruptedException {
             for (MainThread t : mt) {
@@ -417,10 +430,19 @@ public class QuorumPeerTestBase extends ZKTestCase implements Watcher {
             }
         }
 
+        public void shutdownAllClients() throws InterruptedException {
+            for (ZooKeeper zk : zk) {
+                zk.close(5000);
+            }
+        }
+
         public void restartAllServersAndClients(Watcher watcher) throws IOException, InterruptedException {
+            int index = 0;
             for (MainThread t : mt) {
                 if (!t.isAlive()) {
+                    System.setProperty("zookeeper.admin.serverPort", String.valueOf(adminPorts[index]));
                     t.start();
+                    index++;
                 }
             }
             for (int i = 0; i < zk.length; i++) {
@@ -441,45 +463,95 @@ public class QuorumPeerTestBase extends ZKTestCase implements Watcher {
         public int findLeader() {
             for (int i = 0; i < mt.length; i++) {
                 if (mt[i].main.quorumPeer.leader != null) {
+                    LOG.info("Leader is {}", i);
                     return i;
                 }
             }
+            LOG.info("Cannot find Leader");
             return -1;
         }
 
+        public int findAnyFollower() {
+            for (int i = 0; i < mt.length; i++) {
+                if (mt[i].main.quorumPeer.follower != null) {
+                    LOG.info("Follower is {}", i);
+                    return i;
+                }
+            }
+            LOG.info("Cannot find any follower");
+            return -1;
+        }
+
+        public int findAnyObserver() {
+            for (int i = 0; i < mt.length; i++) {
+                if (mt[i].main.quorumPeer.observer != null) {
+                    LOG.info("Observer is {}", i);
+                    return i;
+                }
+            }
+            LOG.info("Cannot find any observer");
+            return -1;
+        }
     }
 
     protected Servers LaunchServers(int numServers) throws IOException, InterruptedException {
-        return LaunchServers(numServers, null);
+        return LaunchServers(numServers, (Integer) null);
+    }
+
+    protected Servers LaunchServers(int numServers, Map<String, String> otherConfigs)
+        throws IOException, InterruptedException {
+        return LaunchServers(numServers, 0, null, otherConfigs);
+    }
+
+    protected Servers LaunchServers(int numServers, Integer tickTime) throws IOException, InterruptedException {
+        return LaunchServers(numServers, 0, tickTime);
+    }
+
+    protected Servers LaunchServers(int numServers, int numObservers, Integer tickTime)
+        throws IOException, InterruptedException {
+        return LaunchServers(numServers, numObservers, tickTime, new HashMap<>());
     }
 
     /** * This is a helper function for launching a set of servers
      *
-     * @param numServers the number of servers
+     * @param numServers the number of participant servers
+     * @param numObservers the number of observer servers
      * @param tickTime A ticktime to pass to MainThread
+     * @param otherConfigs any zoo.cfg configuration
      * @return
      * @throws IOException
      * @throws InterruptedException
      */
-    protected Servers LaunchServers(int numServers, Integer tickTime) throws IOException, InterruptedException {
-        int SERVER_COUNT = numServers;
+    protected Servers LaunchServers(int numServers, int numObservers, Integer tickTime,
+        Map<String, String> otherConfigs) throws IOException, InterruptedException {
+        int SERVER_COUNT = numServers + numObservers;
         QuorumPeerMainTest.Servers svrs = new QuorumPeerMainTest.Servers();
         svrs.clientPorts = new int[SERVER_COUNT];
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < SERVER_COUNT; i++) {
             svrs.clientPorts[i] = PortAssignment.unique();
-            sb.append("server." + i + "=127.0.0.1:" + PortAssignment.unique() + ":" + PortAssignment.unique() + ";" + svrs.clientPorts[i] + "\n");
+            String role = i < numServers ? "participant" : "observer";
+            sb.append(String.format("server.%d=127.0.0.1:%d:%d:%s;127.0.0.1:%d\n",
+                    i, PortAssignment.unique(), PortAssignment.unique(), role,
+                    svrs.clientPorts[i]));
         }
+
+        svrs.adminPorts = new int[SERVER_COUNT];
+        for (int i = 0; i < SERVER_COUNT; i++) {
+            svrs.adminPorts[i] = PortAssignment.unique();
+        }
+
         String quorumCfgSection = sb.toString();
 
         svrs.mt = new MainThread[SERVER_COUNT];
         svrs.zk = new ZooKeeper[SERVER_COUNT];
         for (int i = 0; i < SERVER_COUNT; i++) {
             if (tickTime != null) {
-                svrs.mt[i] = new MainThread(i, svrs.clientPorts[i], quorumCfgSection, new HashMap<String, String>(), tickTime);
+                svrs.mt[i] = new MainThread(i, svrs.clientPorts[i], quorumCfgSection, otherConfigs, tickTime);
             } else {
-                svrs.mt[i] = new MainThread(i, svrs.clientPorts[i], quorumCfgSection);
+                svrs.mt[i] = new MainThread(i, svrs.clientPorts[i], quorumCfgSection, otherConfigs);
             }
+            System.setProperty("zookeeper.admin.serverPort", String.valueOf(svrs.adminPorts[i]));
             svrs.mt[i].start();
             svrs.restartClient(i, this);
         }

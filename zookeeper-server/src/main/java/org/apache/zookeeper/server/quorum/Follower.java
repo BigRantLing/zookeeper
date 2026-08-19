@@ -18,15 +18,18 @@
 
 package org.apache.zookeeper.server.quorum;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Collections;
 import java.util.Map;
+import java.util.Objects;
 import org.apache.jute.Record;
 import org.apache.zookeeper.ZooDefs.OpCode;
 import org.apache.zookeeper.common.Time;
 import org.apache.zookeeper.server.Request;
 import org.apache.zookeeper.server.ServerMetrics;
+import org.apache.zookeeper.server.TxnLogEntry;
 import org.apache.zookeeper.server.quorum.QuorumPeer.QuorumServer;
 import org.apache.zookeeper.server.quorum.flexible.QuorumVerifier;
 import org.apache.zookeeper.server.util.SerializeUtils;
@@ -45,10 +48,10 @@ public class Follower extends Learner {
 
     ObserverMaster om;
 
-    Follower(QuorumPeer self, FollowerZooKeeperServer zk) {
-        this.self = self;
+    Follower(final QuorumPeer self, final FollowerZooKeeperServer zk) {
+        this.self = Objects.requireNonNull(self);
+        this.fzk = Objects.requireNonNull(zk);
         this.zk = zk;
-        this.fzk = zk;
     }
 
     @Override
@@ -99,16 +102,13 @@ public class Follower extends Learner {
                     throw new IOException("Error: Epoch of leader is lower");
                 }
                 long startTime = Time.currentElapsedTime();
-                try {
-                    self.setLeaderAddressAndId(leaderServer.addr, leaderServer.getId());
-                    self.setZabState(QuorumPeer.ZabState.SYNCHRONIZATION);
-                    syncWithLeader(newEpochZxid);
-                    self.setZabState(QuorumPeer.ZabState.BROADCAST);
-                    completedSync = true;
-                } finally {
-                    long syncTime = Time.currentElapsedTime() - startTime;
-                    ServerMetrics.getMetrics().FOLLOWER_SYNC_TIME.add(syncTime);
-                }
+                self.setLeaderAddressAndId(leaderServer.addr, leaderServer.getId());
+                self.setZabState(QuorumPeer.ZabState.SYNCHRONIZATION);
+                syncWithLeader(newEpochZxid);
+                self.setZabState(QuorumPeer.ZabState.BROADCAST);
+                completedSync = true;
+                long syncTime = Time.currentElapsedTime() - startTime;
+                ServerMetrics.getMetrics().FOLLOWER_SYNC_TIME.add(syncTime);
                 if (self.getObserverMasterPort() > 0) {
                     LOG.info("Starting ObserverMaster");
 
@@ -138,9 +138,11 @@ public class Follower extends Learner {
 
             if (connectionTime != 0) {
                 long connectionDuration = System.currentTimeMillis() - connectionTime;
-                LOG.info("Disconnected from leader (with address: {}). "
-                        + "Was connected for {}ms. Sync state: {}",
-                    leaderAddr, connectionDuration, completedSync);
+                LOG.info(
+                    "Disconnected from leader (with address: {}). Was connected for {}ms. Sync state: {}",
+                    leaderAddr,
+                    connectionDuration,
+                    completedSync);
                 messageTracker.dumpToLog(leaderAddr.toString());
             }
         }
@@ -158,21 +160,24 @@ public class Follower extends Learner {
             break;
         case Leader.PROPOSAL:
             ServerMetrics.getMetrics().LEARNER_PROPOSAL_RECEIVED_COUNT.add(1);
-            TxnHeader hdr = new TxnHeader();
-            Record txn = SerializeUtils.deserializeTxn(qp.getData(), hdr);
+            TxnLogEntry logEntry = SerializeUtils.deserializeTxn(qp.getData());
+            TxnHeader hdr = logEntry.getHeader();
+            Record txn = logEntry.getTxn();
             if (hdr.getZxid() != lastQueued + 1) {
-                LOG.warn("Got zxid 0x" + Long.toHexString(hdr.getZxid())
-                         + " expected 0x" + Long.toHexString(lastQueued + 1));
+                LOG.warn(
+                    "Got zxid 0x{} expected 0x{}",
+                    Long.toHexString(hdr.getZxid()),
+                    Long.toHexString(lastQueued + 1));
             }
             lastQueued = hdr.getZxid();
 
             if (hdr.getType() == OpCode.reconfig) {
                 SetDataTxn setDataTxn = (SetDataTxn) txn;
-                QuorumVerifier qv = self.configFromString(new String(setDataTxn.getData()));
+                QuorumVerifier qv = self.configFromString(new String(setDataTxn.getData(), UTF_8));
                 self.setLastSeenQuorumVerifier(qv, true);
             }
 
-            fzk.logRequest(hdr, txn);
+            fzk.logRequest(logEntry.toRequest());
             if (hdr != null) {
                 /*
                  * Request header is created only by the leader, so this is only set
@@ -205,7 +210,7 @@ public class Follower extends Learner {
             // get the new configuration from the request
             Request request = fzk.pendingTxns.element();
             SetDataTxn setDataTxn = (SetDataTxn) request.getTxn();
-            QuorumVerifier qv = self.configFromString(new String(setDataTxn.getData()));
+            QuorumVerifier qv = self.configFromString(new String(setDataTxn.getData(), UTF_8));
 
             // get new designated leader from (current) leader's message
             ByteBuffer buffer = ByteBuffer.wrap(qp.getData());
@@ -244,14 +249,9 @@ public class Follower extends Learner {
      * @return zxid
      */
     public long getZxid() {
-        try {
-            synchronized (fzk) {
-                return fzk.getZxid();
-            }
-        } catch (NullPointerException e) {
-            LOG.warn("error getting zxid", e);
+        synchronized (fzk) {
+            return fzk.getZxid();
         }
-        return -1;
     }
 
     /**
@@ -281,7 +281,7 @@ public class Follower extends Learner {
 
     @Override
     public void shutdown() {
-        LOG.info("shutdown called", new Exception("shutdown Follower"));
+        LOG.info("shutdown Follower");
         super.shutdown();
     }
 

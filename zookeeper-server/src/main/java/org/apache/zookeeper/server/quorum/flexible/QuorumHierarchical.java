@@ -27,9 +27,9 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Properties;
 import java.util.Set;
+import org.apache.zookeeper.common.ConfigException;
 import org.apache.zookeeper.server.quorum.QuorumPeer.LearnerType;
 import org.apache.zookeeper.server.quorum.QuorumPeer.QuorumServer;
-import org.apache.zookeeper.server.quorum.QuorumPeerConfig.ConfigException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -66,15 +66,15 @@ public class QuorumHierarchical implements QuorumVerifier {
 
     private static final Logger LOG = LoggerFactory.getLogger(QuorumHierarchical.class);
 
-    private HashMap<Long, Long> serverWeight = new HashMap<Long, Long>();
-    private HashMap<Long, Long> serverGroup = new HashMap<Long, Long>();
-    private HashMap<Long, Long> groupWeight = new HashMap<Long, Long>();
+    private HashMap<Long, Long> serverWeight = new HashMap<>();
+    private HashMap<Long, Long> serverGroup = new HashMap<>();
+    private HashMap<Long, Long> groupWeight = new HashMap<>();
 
     private int numGroups = 0;
 
-    private Map<Long, QuorumServer> allMembers = new HashMap<Long, QuorumServer>();
-    private Map<Long, QuorumServer> participatingMembers = new HashMap<Long, QuorumServer>();
-    private Map<Long, QuorumServer> observingMembers = new HashMap<Long, QuorumServer>();
+    private Map<Long, QuorumServer> allMembers = new HashMap<>();
+    private Map<Long, QuorumServer> participatingMembers = new HashMap<>();
+    private Map<Long, QuorumServer> observingMembers = new HashMap<>();
 
     private long version = 0;
 
@@ -120,6 +120,7 @@ public class QuorumHierarchical implements QuorumVerifier {
         }
         return true;
     }
+
     /**
      * This constructor requires the quorum configuration
      * to be declared in a separate file, and it takes the
@@ -136,7 +137,7 @@ public class QuorumHierarchical implements QuorumVerifier {
 
     public QuorumHierarchical(Properties qp) throws ConfigException {
         parse(qp);
-        LOG.info(serverWeight.size() + ", " + serverGroup.size() + ", " + groupWeight.size());
+        LOG.info("{}, {}, {}", serverWeight.size(), serverGroup.size(), groupWeight.size());
     }
 
     /**
@@ -155,7 +156,7 @@ public class QuorumHierarchical implements QuorumVerifier {
     private void readConfigFile(String filename) throws ConfigException {
         File configFile = new File(filename);
 
-        LOG.info("Reading configuration from: " + configFile);
+        LOG.info("Reading configuration from: {}", configFile);
 
         try {
             if (!configFile.exists()) {
@@ -254,7 +255,7 @@ public class QuorumHierarchical implements QuorumVerifier {
             sw.append('\n');
         }
 
-        Map<Long, String> groups = new HashMap<Long, String>();
+        Map<Long, String> groups = new HashMap<>();
         for (Entry<Long, Long> pair : serverGroup.entrySet()) {
             Long sid = pair.getKey();
             Long gid = pair.getValue();
@@ -325,7 +326,7 @@ public class QuorumHierarchical implements QuorumVerifier {
      * Verifies if a given set is a quorum.
      */
     public boolean containsQuorum(Set<Long> set) {
-        HashMap<Long, Long> expansion = new HashMap<Long, Long>();
+        HashMap<Long, Long> expansion = new HashMap<>();
 
         /*
          * Adds up weights per group

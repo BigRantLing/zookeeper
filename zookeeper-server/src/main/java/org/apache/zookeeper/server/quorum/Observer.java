@@ -18,16 +18,21 @@
 
 package org.apache.zookeeper.server.quorum;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import java.nio.ByteBuffer;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.jute.Record;
+import org.apache.zookeeper.common.Time;
 import org.apache.zookeeper.server.ObserverBean;
 import org.apache.zookeeper.server.Request;
 import org.apache.zookeeper.server.ServerMetrics;
+import org.apache.zookeeper.server.TxnLogEntry;
 import org.apache.zookeeper.server.quorum.QuorumPeer.QuorumServer;
 import org.apache.zookeeper.server.quorum.flexible.QuorumVerifier;
 import org.apache.zookeeper.server.util.SerializeUtils;
 import org.apache.zookeeper.txn.SetDataTxn;
+import org.apache.zookeeper.txn.TxnDigest;
 import org.apache.zookeeper.txn.TxnHeader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -66,9 +71,9 @@ public class Observer extends Learner {
 
     static {
         reconnectDelayMs = Long.getLong(OBSERVER_RECONNECT_DELAY_MS, 0);
-        LOG.info(OBSERVER_RECONNECT_DELAY_MS + " = " + reconnectDelayMs);
+        LOG.info("{} = {}", OBSERVER_RECONNECT_DELAY_MS, reconnectDelayMs);
         observerElectionDelayMs = Long.getLong(OBSERVER_ELECTION_DELAY_MS, 200);
-        LOG.info(OBSERVER_ELECTION_DELAY_MS + " = " + observerElectionDelayMs);
+        LOG.info("{} = {}", OBSERVER_ELECTION_DELAY_MS , observerElectionDelayMs);
     }
 
     /**
@@ -110,11 +115,14 @@ public class Observer extends Learner {
                     throw new Exception("learned about role change");
                 }
 
+                final long startTime = Time.currentElapsedTime();
                 self.setLeaderAddressAndId(master.addr, master.getId());
                 self.setZabState(QuorumPeer.ZabState.SYNCHRONIZATION);
                 syncWithLeader(newLeaderZxid);
                 self.setZabState(QuorumPeer.ZabState.BROADCAST);
                 completedSync = true;
+                final long syncTime = Time.currentElapsedTime() - startTime;
+                ServerMetrics.getMetrics().OBSERVER_SYNC_TIME.add(syncTime);
                 QuorumPacket qp = new QuorumPacket();
                 while (this.isRunning() && nextLearnerMaster.get() == null) {
                     readPacket(qp);
@@ -133,9 +141,11 @@ public class Observer extends Learner {
             if (connectTime != 0) {
                 long connectionDuration = System.currentTimeMillis() - connectTime;
 
-                LOG.info("Disconnected from leader (with address: {}). "
-                        + "Was connected for {}ms. Sync state: {}",
-                    leaderAddr, connectionDuration, completedSync);
+                LOG.info(
+                    "Disconnected from leader (with address: {}). Was connected for {}ms. Sync state: {}",
+                    leaderAddr,
+                    connectionDuration,
+                    completedSync);
                 messageTracker.dumpToLog(leaderAddr.toString());
             }
         }
@@ -166,6 +176,10 @@ public class Observer extends Learner {
      * @throws Exception
      */
     protected void processPacket(QuorumPacket qp) throws Exception {
+        TxnLogEntry logEntry;
+        TxnHeader hdr;
+        TxnDigest digest;
+        Record txn;
         switch (qp.getType()) {
         case Leader.PING:
             ping(qp);
@@ -187,26 +201,24 @@ public class Observer extends Learner {
             break;
         case Leader.INFORM:
             ServerMetrics.getMetrics().LEARNER_COMMIT_RECEIVED_COUNT.add(1);
-            TxnHeader hdr = new TxnHeader();
-            Record txn = SerializeUtils.deserializeTxn(qp.getData(), hdr);
-            Request request = new Request(hdr.getClientId(), hdr.getCxid(), hdr.getType(), hdr, txn, 0);
+            logEntry = SerializeUtils.deserializeTxn(qp.getData());
+            Request request = logEntry.toRequest();
             request.logLatency(ServerMetrics.getMetrics().COMMIT_PROPAGATION_LATENCY);
             ObserverZooKeeperServer obs = (ObserverZooKeeperServer) zk;
             obs.commitRequest(request);
             break;
         case Leader.INFORMANDACTIVATE:
-            hdr = new TxnHeader();
-
             // get new designated leader from (current) leader's message
             ByteBuffer buffer = ByteBuffer.wrap(qp.getData());
             long suggestedLeaderId = buffer.getLong();
 
             byte[] remainingdata = new byte[buffer.remaining()];
             buffer.get(remainingdata);
-            txn = SerializeUtils.deserializeTxn(remainingdata, hdr);
-            QuorumVerifier qv = self.configFromString(new String(((SetDataTxn) txn).getData()));
+            logEntry = SerializeUtils.deserializeTxn(remainingdata);
+            txn = logEntry.getTxn();
+            QuorumVerifier qv = self.configFromString(new String(((SetDataTxn) txn).getData(), UTF_8));
 
-            request = new Request(hdr.getClientId(), hdr.getCxid(), hdr.getType(), hdr, txn, 0);
+            request = logEntry.toRequest();
             obs = (ObserverZooKeeperServer) zk;
 
             boolean majorChange = self.processReconfig(qv, suggestedLeaderId, qp.getZxid(), true);
@@ -227,7 +239,7 @@ public class Observer extends Learner {
      * Shutdown the Observer.
      */
     public void shutdown() {
-        LOG.info("shutdown called", new Exception("shutdown Observer"));
+        LOG.info("shutdown Observer");
         super.shutdown();
     }
 
@@ -241,12 +253,12 @@ public class Observer extends Learner {
 
     private static void waitForReconnectDelayHelper(long delayValueMs) {
         if (delayValueMs > 0) {
-            long randomDelay = (long) (delayValueMs * Math.random());
-            LOG.info("Waiting for " + randomDelay + " ms before reconnecting with the leader");
+            long randomDelay = ThreadLocalRandom.current().nextLong(delayValueMs);
+            LOG.info("Waiting for {} ms before reconnecting with the leader", randomDelay);
             try {
                 Thread.sleep(randomDelay);
             } catch (InterruptedException e) {
-                LOG.warn("Interrupted while waiting" + e.getMessage());
+                LOG.warn("Interrupted while waiting", e);
             }
         }
     }
@@ -285,7 +297,7 @@ public class Observer extends Learner {
 
     public static void setObserverElectionDelayMs(long electionDelayMs) {
         observerElectionDelayMs = electionDelayMs;
-        LOG.info(OBSERVER_ELECTION_DELAY_MS + " = " + observerElectionDelayMs);
+        LOG.info("{} = {}", OBSERVER_ELECTION_DELAY_MS, observerElectionDelayMs);
     }
 
 }

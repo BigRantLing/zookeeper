@@ -38,7 +38,7 @@ public class FilePadding {
             try {
                 preAllocSize = Long.parseLong(size) * 1024;
             } catch (NumberFormatException e) {
-                LOG.warn(size + " is not a valid value for preAllocSize");
+                LOG.warn("{} is not a valid value for preAllocSize", size);
             }
         }
     }
@@ -73,13 +73,18 @@ public class FilePadding {
      * @throws IOException
      */
     long padFile(FileChannel fileChannel) throws IOException {
-        long newFileSize = calculateFileSizeWithPadding(fileChannel.position(), currentSize, preAllocSize);
+        return this.padFile(fileChannel, fileChannel.position());
+    }
+
+    long padFile(FileChannel fileChannel, long position) throws IOException {
+        long newFileSize = calculateFileSizeWithPadding(position, currentSize, preAllocSize);
         if (currentSize != newFileSize) {
             fileChannel.write((ByteBuffer) fill.position(0), newFileSize - fill.remaining());
             currentSize = newFileSize;
         }
         return currentSize;
     }
+
 
     /**
      * Calculates a new file size with padding. We only return a new size if

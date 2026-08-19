@@ -18,16 +18,13 @@
 
 package org.apache.zookeeper.server;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.Iterator;
-import org.apache.jute.BinaryOutputArchive;
-import org.apache.jute.Record;
 import org.apache.zookeeper.server.persistence.TxnLog.TxnIterator;
+import org.apache.zookeeper.server.persistence.Util;
 import org.apache.zookeeper.server.quorum.Leader;
 import org.apache.zookeeper.server.quorum.Leader.Proposal;
 import org.apache.zookeeper.server.quorum.QuorumPacket;
-import org.apache.zookeeper.txn.TxnHeader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -61,28 +58,19 @@ public class TxnLogProposalIterator implements Iterator<Proposal> {
     @Override
     public Proposal next() {
 
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        BinaryOutputArchive boa = BinaryOutputArchive.getArchive(baos);
-        Proposal p = new Proposal();
+        Proposal p;
         try {
-            TxnHeader hdr = itr.getHeader();
-            Record txn = itr.getTxn();
-            hdr.serialize(boa, "hdr");
-            if (txn != null) {
-                txn.serialize(boa, "txn");
-            }
-            baos.close();
+            byte[] serializedData = Util.marshallTxnEntry(itr.getHeader(), itr.getTxn(), itr.getDigest());
 
-            QuorumPacket pp = new QuorumPacket(Leader.PROPOSAL, itr.getHeader().getZxid(), baos.toByteArray(), null);
-            p.packet = pp;
-            p.request = null;
-
+            QuorumPacket pp = new QuorumPacket(Leader.PROPOSAL, itr.getHeader().getZxid(), serializedData, null);
+            p = new Proposal(pp);
             // This is the only place that can throw IO exception
             hasNext = itr.next();
 
         } catch (IOException e) {
             LOG.error("Unable to read txnlog from disk", e);
             hasNext = false;
+            p = new Proposal();
         }
 
         return p;

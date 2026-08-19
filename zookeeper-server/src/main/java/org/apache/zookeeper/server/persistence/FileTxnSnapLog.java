@@ -38,6 +38,7 @@ import org.apache.zookeeper.server.ServerStats;
 import org.apache.zookeeper.server.ZooTrace;
 import org.apache.zookeeper.server.persistence.TxnLog.TxnIterator;
 import org.apache.zookeeper.txn.CreateSessionTxn;
+import org.apache.zookeeper.txn.TxnDigest;
 import org.apache.zookeeper.txn.TxnHeader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,10 +51,10 @@ import org.slf4j.LoggerFactory;
  */
 public class FileTxnSnapLog {
 
-    //the directory containing the
+    //the directory containing
     //the transaction logs
     final File dataDir;
-    //the directory containing the
+    //the directory containing
     //the snapshot directory
     final File snapDir;
     TxnLog txnLog;
@@ -86,8 +87,20 @@ public class FileTxnSnapLog {
      */
     public interface PlayBackListener {
 
-        void onTxnLoaded(TxnHeader hdr, Record rec);
+        void onTxnLoaded(TxnHeader hdr, Record rec, TxnDigest digest);
 
+    }
+
+    /**
+     * Finalizing restore of data tree through
+     * a set of operations (replaying transaction logs,
+     * calculating data tree digests, and so on.).
+     */
+    private interface RestoreFinalizer {
+        /**
+         * @return the highest zxid of restored data tree.
+         */
+        long run() throws IOException;
     }
 
     /**
@@ -108,7 +121,7 @@ public class FileTxnSnapLog {
             System.getProperty(ZOOKEEPER_DATADIR_AUTOCREATE, ZOOKEEPER_DATADIR_AUTOCREATE_DEFAULT));
 
         trustEmptySnapshot = Boolean.getBoolean(ZOOKEEPER_SNAPSHOT_TRUST_EMPTY);
-        LOG.info(ZOOKEEPER_SNAPSHOT_TRUST_EMPTY + " : " + trustEmptySnapshot);
+        LOG.info("{} : {}", ZOOKEEPER_SNAPSHOT_TRUST_EMPTY, trustEmptySnapshot);
 
         if (!this.dataDir.exists()) {
             if (!enableAutocreate) {
@@ -119,7 +132,7 @@ public class FileTxnSnapLog {
                     ZOOKEEPER_DATADIR_AUTOCREATE));
             }
 
-            if (!this.dataDir.mkdirs()) {
+            if (!this.dataDir.mkdirs() && !this.dataDir.exists()) {
                 throw new DatadirException("Unable to create data directory " + this.dataDir);
             }
         }
@@ -138,7 +151,7 @@ public class FileTxnSnapLog {
                     ZOOKEEPER_DATADIR_AUTOCREATE));
             }
 
-            if (!this.snapDir.mkdirs()) {
+            if (!this.snapDir.mkdirs() && !this.snapDir.exists()) {
                 throw new DatadirException("Unable to create snap directory " + this.snapDir);
             }
         }
@@ -191,11 +204,11 @@ public class FileTxnSnapLog {
     }
 
     /**
-     * get the datadir used by this filetxn
+     * get the data log dir used by this filetxn
      * snap log
-     * @return the data dir
+     * @return the data log dir
      */
-    public File getDataDir() {
+    public File getDataLogDir() {
         return this.dataDir;
     }
 
@@ -214,6 +227,15 @@ public class FileTxnSnapLog {
      */
     public SnapshotInfo getLastSnapshotInfo() {
         return this.snapLog.getLastSnapshotInfo();
+    }
+
+    /**
+     * whether to force the write of an initial snapshot after a leader election,
+     * to address ZOOKEEPER-3781 after upgrading from Zookeeper 3.4.x.
+     * @return true if an initial snapshot should be written even if not otherwise required, false otherwise.
+     */
+    public boolean shouldForceWriteInitialSnapshotAfterLeaderElection() {
+        return trustEmptySnapshot && getLastSnapshotInfo() == null;
     }
 
     /**
@@ -241,6 +263,23 @@ public class FileTxnSnapLog {
             trustEmptyDB = autoCreateDB;
         }
 
+        RestoreFinalizer finalizer = () -> {
+            long highestZxid = fastForwardFromEdits(dt, sessions, listener);
+            // The snapshotZxidDigest will reset after replaying the txn of the
+            // zxid in the snapshotZxidDigest, if it's not reset to null after
+            // restoring, it means either there are not enough txns to cover that
+            // zxid or that txn is missing
+            DataTree.ZxidDigest snapshotZxidDigest = dt.getDigestFromLoadedSnapshot();
+            if (snapshotZxidDigest != null) {
+                LOG.warn(
+                        "Highest txn zxid 0x{} is not covering the snapshot digest zxid 0x{}, "
+                                + "which might lead to inconsistent state",
+                        Long.toHexString(highestZxid),
+                        Long.toHexString(snapshotZxidDigest.getZxid()));
+            }
+            return highestZxid;
+        };
+
         if (-1L == deserializeResult) {
             /* this means that we couldn't find any snapshot, so we need to
              * initialize an empty database (reported in ZOOKEEPER-2325) */
@@ -250,7 +289,8 @@ public class FileTxnSnapLog {
                 if (!trustEmptySnapshot) {
                     throw new IOException(EMPTY_SNAPSHOT_WARNING + "Something is broken!");
                 } else {
-                    LOG.warn(EMPTY_SNAPSHOT_WARNING + "This should only be allowed during upgrading.");
+                    LOG.warn("{}This should only be allowed during upgrading.", EMPTY_SNAPSHOT_WARNING);
+                    return finalizer.run();
                 }
             }
 
@@ -269,23 +309,11 @@ public class FileTxnSnapLog {
             }
         }
 
-        long highestZxid = fastForwardFromEdits(dt, sessions, listener);
-        // The snapshotZxidDigest will reset after replaying the txn of the
-        // zxid in the snapshotZxidDigest, if it's not reset to null after
-        // restoring, it means either there are not enough txns to cover that
-        // zxid or that txn is missing
-        DataTree.ZxidDigest snapshotZxidDigest = dt.getDigestFromLoadedSnapshot();
-        if (snapshotZxidDigest != null) {
-            LOG.warn("Highest txn zxid 0x{} is not covering the snapshot "
-                     + "digest zxid 0x{}, which might lead to inconsistent state",
-                     Long.toHexString(highestZxid),
-                     Long.toHexString(snapshotZxidDigest.getZxid()));
-        }
-        return highestZxid;
+        return finalizer.run();
     }
 
     /**
-     * This function will fast forward the server database to have the latest
+     * This function will fast-forward the server database to have the latest
      * transactions in it.  This is the same as restore, but only reads from
      * the transaction logs and not restores from a snapshot.
      * @param dt the datatree to write transactions to.
@@ -320,6 +348,7 @@ public class FileTxnSnapLog {
                 }
                 try {
                     processTransaction(hdr, dt, sessions, itr.getTxn());
+                    dt.compareDigest(hdr, itr.getTxn(), itr.getDigest());
                     txnLoaded++;
                 } catch (KeeperException.NoNodeException e) {
                     throw new IOException("Failed to process transaction type: "
@@ -328,7 +357,7 @@ public class FileTxnSnapLog {
                                           + e.getMessage(),
                                           e);
                 }
-                listener.onTxnLoaded(hdr, itr.getTxn());
+                listener.onTxnLoaded(hdr, itr.getTxn(), itr.getDigest());
                 if (!itr.next()) {
                     break;
                 }
@@ -439,9 +468,10 @@ public class FileTxnSnapLog {
      * @param sessionsWithTimeouts the session timeouts to be
      * serialized onto disk
      * @param syncSnap sync the snapshot immediately after write
+     * @return the snapshot file
      * @throws IOException
      */
-    public void save(
+    public File save(
         DataTree dataTree,
         ConcurrentHashMap<Long, Integer> sessionsWithTimeouts,
         boolean syncSnap) throws IOException {
@@ -450,6 +480,7 @@ public class FileTxnSnapLog {
         LOG.info("Snapshotting: 0x{} to {}", Long.toHexString(lastZxid), snapshotFile);
         try {
             snapLog.serialize(dataTree, sessionsWithTimeouts, snapshotFile, syncSnap);
+            return snapshotFile;
         } catch (IOException e) {
             if (snapshotFile.length() == 0) {
                 /* This may be caused by a full disk. In such a case, the server
@@ -458,9 +489,9 @@ public class FileTxnSnapLog {
                  * Doing so will eventually result in valid snapshots being
                  * removed during cleanup. */
                 if (snapshotFile.delete()) {
-                    LOG.info("Deleted empty snapshot file: " + snapshotFile.getAbsolutePath());
+                    LOG.info("Deleted empty snapshot file: {}", snapshotFile.getAbsolutePath());
                 } else {
-                    LOG.warn("Could not delete empty snapshot file: " + snapshotFile.getAbsolutePath());
+                    LOG.warn("Could not delete empty snapshot file: {}", snapshotFile.getAbsolutePath());
                 }
             } else {
                 /* Something else went wrong when writing the snapshot out to
@@ -479,23 +510,28 @@ public class FileTxnSnapLog {
      * @return true if able to truncate the log, false if not
      * @throws IOException
      */
-    public boolean truncateLog(long zxid) throws IOException {
-        // close the existing txnLog and snapLog
-        close();
+    public boolean truncateLog(long zxid) {
+        try {
+            // close the existing txnLog and snapLog
+            close();
 
-        // truncate it
-        FileTxnLog truncLog = new FileTxnLog(dataDir);
-        boolean truncated = truncLog.truncate(zxid);
-        truncLog.close();
+            // truncate it
+            try (FileTxnLog truncLog = new FileTxnLog(dataDir)) {
+                boolean truncated = truncLog.truncate(zxid);
 
-        // re-open the txnLog and snapLog
-        // I'd rather just close/reopen this object itself, however that
-        // would have a big impact outside ZKDatabase as there are other
-        // objects holding a reference to this object.
-        txnLog = new FileTxnLog(dataDir);
-        snapLog = new FileSnap(snapDir);
+                // re-open the txnLog and snapLog
+                // I'd rather just close/reopen this object itself, however that
+                // would have a big impact outside ZKDatabase as there are other
+                // objects holding a reference to this object.
+                txnLog = new FileTxnLog(dataDir);
+                snapLog = new FileSnap(snapDir);
 
-        return truncated;
+                return truncated;
+            }
+        } catch (IOException e) {
+            LOG.error("Unable to truncate Txn log", e);
+            return false;
+        }
     }
 
     /**
@@ -523,13 +559,24 @@ public class FileTxnSnapLog {
     }
 
     /**
+     * the n recent valid snapshots
+     * @param n the number of recent valid snapshots
+     * @return the list of n recent valid snapshots, with
+     * the most recent in front
+     */
+    public List<File> findNValidSnapshots(int n) {
+        FileSnap snaplog = new FileSnap(snapDir);
+        return snaplog.findNValidSnapshots(n);
+    }
+
+    /**
      * get the snapshot logs which may contain transactions newer than the given zxid.
      * This includes logs with starting zxid greater than given zxid, as well as the
      * newest transaction log with starting zxid less than given zxid.  The latter log
      * file may contain transactions beyond given zxid.
      * @param zxid the zxid that contains logs greater than
      * zxid
-     * @return
+     * @return the snapshot logs which may contain transactions newer than the given zxid
      */
     public File[] getSnapshotLogs(long zxid) {
         return FileTxnLog.getLogFiles(dataDir.listFiles(), zxid);
@@ -542,7 +589,7 @@ public class FileTxnSnapLog {
      * @throws IOException
      */
     public boolean append(Request si) throws IOException {
-        return txnLog.append(si.getHdr(), si.getTxn());
+        return txnLog.append(si);
     }
 
     /**
@@ -574,8 +621,16 @@ public class FileTxnSnapLog {
      * @throws IOException
      */
     public void close() throws IOException {
-        txnLog.close();
-        snapLog.close();
+        TxnLog txnLogToClose = txnLog;
+        if (txnLogToClose != null) {
+            txnLogToClose.close();
+        }
+        txnLog = null;
+        SnapShot snapSlogToClose = snapLog;
+        if (snapSlogToClose != null) {
+            snapSlogToClose.close();
+        }
+        snapLog = null;
     }
 
     @SuppressWarnings("serial")

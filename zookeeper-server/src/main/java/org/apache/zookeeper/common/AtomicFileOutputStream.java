@@ -45,7 +45,7 @@ import org.slf4j.LoggerFactory;
  */
 public class AtomicFileOutputStream extends FilterOutputStream {
 
-    private static final String TMP_EXTENSION = ".tmp";
+    public static final String TMP_EXTENSION = ".tmp";
 
     private static final Logger LOG = LoggerFactory.getLogger(AtomicFileOutputStream.class);
 
@@ -99,7 +99,7 @@ public class AtomicFileOutputStream extends FilterOutputStream {
                 }
                 // close wasn't successful, try to delete the tmp file
                 if (!tmpFile.delete()) {
-                    LOG.warn("Unable to delete tmp file " + tmpFile);
+                    LOG.warn("Unable to delete tmp file {}", tmpFile);
                 }
             }
         }
@@ -113,10 +113,11 @@ public class AtomicFileOutputStream extends FilterOutputStream {
         try {
             super.close();
         } catch (IOException ioe) {
-            LOG.warn("Unable to abort file " + tmpFile, ioe);
+            LOG.warn("Unable to abort file {}", tmpFile, ioe);
         }
+
         if (!tmpFile.delete()) {
-            LOG.warn("Unable to delete tmp file during abort " + tmpFile);
+            LOG.warn("Unable to delete tmp file during abort {}", tmpFile);
         }
     }
 

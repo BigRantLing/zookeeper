@@ -34,6 +34,7 @@ import org.apache.jute.BinaryOutputArchive;
 import org.apache.jute.InputArchive;
 import org.apache.jute.OutputArchive;
 import org.apache.jute.Record;
+import org.apache.zookeeper.txn.TxnDigest;
 import org.apache.zookeeper.txn.TxnHeader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -171,21 +172,25 @@ public class Util {
         return null;
     }
 
+
     /**
      * Serializes transaction header and transaction data into a byte buffer.
      *
      * @param hdr transaction header
      * @param txn transaction data
+     * @param digest transaction digest
+     *
      * @return serialized transaction record
-     * @throws IOException
      */
-    public static byte[] marshallTxnEntry(TxnHeader hdr, Record txn) throws IOException {
+    public static byte[] marshallTxnEntry(TxnHeader hdr, Record txn, TxnDigest digest) throws IOException {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         OutputArchive boa = BinaryOutputArchive.getArchive(baos);
-
         hdr.serialize(boa, "hdr");
         if (txn != null) {
             txn.serialize(boa, "txn");
+        }
+        if (digest != null) {
+            digest.serialize(boa, "digest");
         }
         return baos.toByteArray();
     }
@@ -239,7 +244,7 @@ public class Util {
      */
     public static List<File> sortDataDir(File[] files, String prefix, boolean ascending) {
         if (files == null) {
-            return new ArrayList<File>(0);
+            return new ArrayList<>(0);
         }
         List<File> filelist = Arrays.asList(files);
         Collections.sort(filelist, new DataDirFileComparator(prefix, ascending));
@@ -250,7 +255,6 @@ public class Util {
      * Returns true if fileName is a log file name.
      *
      * @param fileName
-     * @return
      */
     public static boolean isLogFileName(String fileName) {
         return fileName.startsWith(FileTxnLog.LOG_FILE_PREFIX + ".");
@@ -260,7 +264,6 @@ public class Util {
      * Returns true if fileName is a snapshot file name.
      *
      * @param fileName
-     * @return
      */
     public static boolean isSnapshotFileName(String fileName) {
         return fileName.startsWith(FileSnap.SNAPSHOT_FILE_PREFIX + ".");

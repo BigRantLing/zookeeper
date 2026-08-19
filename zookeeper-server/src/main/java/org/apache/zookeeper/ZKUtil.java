@@ -23,7 +23,9 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Queue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.zookeeper.AsyncCallback.MultiCallback;
@@ -31,12 +33,14 @@ import org.apache.zookeeper.AsyncCallback.StringCallback;
 import org.apache.zookeeper.AsyncCallback.VoidCallback;
 import org.apache.zookeeper.KeeperException.Code;
 import org.apache.zookeeper.common.PathUtils;
+import org.apache.zookeeper.data.ACL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public class ZKUtil {
 
     private static final Logger LOG = LoggerFactory.getLogger(ZKUtil.class);
+    private static final Map<Integer, String> permCache = new ConcurrentHashMap<>();
     /**
      * Recursively delete the node with the given path.
      * <p>
@@ -45,7 +49,14 @@ public class ZKUtil {
      * If there is an error with deleting one of the sub-nodes in the tree,
      * this operation would abort and would be the responsibility of the app to handle the same.
      *
-     *
+     * @param zk Zookeeper client
+     * @param pathRoot path to be deleted
+     * @param batchSize number of delete operations to be submitted in one call.
+     *                  batchSize is also used to decide sync and async delete API invocation.
+     *                  If batchSize>0 then async otherwise sync delete API is invoked. batchSize>0
+     *                  gives better performance. batchSize<=0 scenario is handled to preserve
+     *                  backward compatibility.
+     * @return true if given node and all its sub nodes are deleted successfully otherwise false
      * @throws IllegalArgumentException if an invalid path is specified
      */
     public static boolean deleteRecursive(
@@ -57,7 +68,28 @@ public class ZKUtil {
         List<String> tree = listSubTreeBFS(zk, pathRoot);
         LOG.debug("Deleting tree: {}", tree);
 
-        return deleteInBatch(zk, tree, batchSize);
+        if (batchSize > 0) {
+            return deleteInBatch(zk, tree, batchSize);
+        } else {
+            for (int i = tree.size() - 1; i >= 0; --i) {
+                //Delete the leaves first and eventually get rid of the root
+                zk.delete(tree.get(i), -1); //Delete all versions of the node with -1.
+            }
+            return true;
+        }
+    }
+
+    /**
+     * Same as {@link #deleteRecursive(org.apache.zookeeper.ZooKeeper, java.lang.String, int)}
+     * kept here for compatibility with 3.5 clients.
+     *
+     * @since 3.6.1
+     */
+    public static void deleteRecursive(
+        ZooKeeper zk,
+        final String pathRoot) throws InterruptedException, KeeperException {
+        // batchSize=0 is passed to preserve the backward compatibility with older clients.
+        deleteRecursive(zk, pathRoot, 0);
     }
 
     private static class BatchedDeleteCbContext {
@@ -77,10 +109,10 @@ public class ZKUtil {
         List<Op> ops = new ArrayList<>();
         BatchedDeleteCbContext context = new BatchedDeleteCbContext(rateLimit);
         MultiCallback cb = (rc, path, ctx, opResults) -> {
-            ((BatchedDeleteCbContext) ctx).sem.release();
             if (rc != Code.OK.intValue()) {
                 ((BatchedDeleteCbContext) ctx).success.set(false);
             }
+            ((BatchedDeleteCbContext) ctx).sem.release();
         };
 
         // Delete the leaves first and eventually get rid of the root
@@ -147,7 +179,7 @@ public class ZKUtil {
             return "Read permission is denied on the file '" + file.getAbsolutePath() + "'";
         }
         if (file.isDirectory()) {
-            return "'" + file.getAbsolutePath() + "' is a direcory. it must be a file.";
+            return "'" + file.getAbsolutePath() + "' is a directory. it must be a file.";
         }
         return null;
     }
@@ -170,14 +202,15 @@ public class ZKUtil {
         ZooKeeper zk,
         final String pathRoot) throws KeeperException, InterruptedException {
         Queue<String> queue = new ArrayDeque<>();
-        List<String> tree = new ArrayList<String>();
+        List<String> tree = new ArrayList<>();
         queue.add(pathRoot);
         tree.add(pathRoot);
         while (!queue.isEmpty()) {
             String node = queue.poll();
             List<String> children = zk.getChildren(node, false);
             for (final String child : children) {
-                final String childPath = node + "/" + child;
+                // Fix IllegalArgumentException when list "/".
+                final String childPath = (node.equals("/") ? "" : node) + "/" + child;
                 queue.add(childPath);
                 tree.add(childPath);
             }
@@ -234,4 +267,44 @@ public class ZKUtil {
         }
     }
 
+    /**
+     * @param perms
+     *            ACL permissions
+     * @return string representation of permissions
+     */
+    public static String getPermString(int perms) {
+        return permCache.computeIfAbsent(perms, k -> constructPermString(k));
+    }
+
+    private static String constructPermString(int perms) {
+        StringBuilder p = new StringBuilder();
+        if ((perms & ZooDefs.Perms.CREATE) != 0) {
+            p.append('c');
+        }
+        if ((perms & ZooDefs.Perms.DELETE) != 0) {
+            p.append('d');
+        }
+        if ((perms & ZooDefs.Perms.READ) != 0) {
+            p.append('r');
+        }
+        if ((perms & ZooDefs.Perms.WRITE) != 0) {
+            p.append('w');
+        }
+        if ((perms & ZooDefs.Perms.ADMIN) != 0) {
+            p.append('a');
+        }
+        return p.toString();
+    }
+
+    public static String aclToString(List<ACL> acls) {
+        StringBuilder sb = new StringBuilder();
+        for (ACL acl : acls) {
+            sb.append(acl.getId().getScheme());
+            sb.append(":");
+            sb.append(acl.getId().getId());
+            sb.append(":");
+            sb.append(getPermString(acl.getPerms()));
+        }
+        return sb.toString();
+    }
 }
